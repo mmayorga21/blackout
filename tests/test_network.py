@@ -260,14 +260,24 @@ class TwoStores(unittest.TestCase):
             self.assertEqual(store.stop(), 0)
         a, b = self.start("A"), self.start("B")
         self.until(lambda: self.synchronized(2))
+        # La cadena suma 1500, pero ninguna tienda alcanzó su límite propio de 1000.
+        for store in (a, b):
+            latest = self.query(store).rsplit(b"Estado:", 1)[1].splitlines()[0]
+            self.assertIn(b"ABIERTA", latest)
+        a.send("venta 200\n")
+        self.until(lambda: self.synchronized(3))
+        self.assertIn(b"SOLO_CONSULTA", self.query(a).rsplit(b"Estado:", 1)[1].splitlines()[0])
+        self.assertIn(b"ABIERTA", self.query(b).rsplit(b"Estado:", 1)[1].splitlines()[0])
+        b.send("venta 300\n")
+        self.until(lambda: self.synchronized(4))
         for store in (a, b):
             self.assertIn(b"Estado: SOLO_CONSULTA", self.query(store))
             previous = len(store.errors)
             store.send("venta 1\nhistorial\nayuda\n")
             self.until(lambda: b"Venta rechazada" in store.errors[previous:])
             self.assertIsNone(store.process.poll())
-        self.assertEqual(len(self.rows("A")), 2)
-        self.assertEqual(len(self.rows("B")), 2)
+        self.assertEqual(len(self.rows("A")), 4)
+        self.assertEqual(len(self.rows("B")), 4)
 
     def test_chain_and_limit_mismatch_never_share(self):
         self.configure("B", chain="Y")
@@ -280,15 +290,38 @@ class TwoStores(unittest.TestCase):
         self.assertIn(b"Ingresos propios: 100", self.query(a))
         self.assertIn(b"Ingresos propios: 200", self.query(b))
 
-    def test_mismatched_limits_never_share(self):
+    def test_different_local_limits_share_and_stop_independently(self):
         self.configure("B", limit=200000)
         a, b = self.start("A"), self.start("B")
-        a.send("venta 100\n")
-        self.until(lambda: any(b"Mensaje de red rechazado" in s.errors for s in (a, b)))
-        self.assertEqual(len(self.rows("A")), 1)
-        self.assertEqual(self.rows("B"), [])
+        a.send("venta 100000\n")
+        self.until(lambda: self.synchronized(1))
+        self.assertIn(b"SOLO_CONSULTA", self.query(a).rsplit(b"Estado:", 1)[1].splitlines()[0])
+        self.assertIn(b"ABIERTA", self.query(b).rsplit(b"Estado:", 1)[1].splitlines()[0])
+        b.send("venta 200000\n")
+        self.until(lambda: self.synchronized(2))
+        self.assertIn(b"SOLO_CONSULTA", self.query(b).rsplit(b"Estado:", 1)[1].splitlines()[0])
+        self.assertIn(b"Ingresos propios: 100000 | Ingresos conocidos de cadena: 300000", self.query(a))
+        self.assertIn(b"Ingresos propios: 200000 | Ingresos conocidos de cadena: 300000", self.query(b))
         self.assertIsNone(a.process.poll())
         self.assertIsNone(b.process.poll())
+
+    def test_restart_preserves_independent_limit_after_peer_reaches_its_limit(self):
+        for name in "AB":
+            self.configure(name, limit=1000)
+        a, b = self.start("A"), self.start("B")
+        a.send("venta 1000\n")
+        self.until(lambda: self.synchronized(1))
+        b.send("venta 400\n")
+        self.until(lambda: self.synchronized(2))
+        self.assertEqual(a.stop(), 0)
+        self.assertEqual(b.stop(), 0)
+        a, b = self.start("A"), self.start("B")
+        self.assertIn(b"SOLO_CONSULTA", self.query(a).rsplit(b"Estado:", 1)[1].splitlines()[0])
+        self.assertIn(b"ABIERTA", self.query(b).rsplit(b"Estado:", 1)[1].splitlines()[0])
+        b.send("venta 600\n")
+        self.until(lambda: self.synchronized(3))
+        self.assertIn(b"SOLO_CONSULTA", self.query(b).rsplit(b"Estado:", 1)[1].splitlines()[0])
+        self.assertIn(b"Ingresos propios: 1000 | Ingresos conocidos de cadena: 2000", self.query(a))
 
     def test_fragmented_grouped_duplicate_and_conflicting_sales(self):
         b = self.start("B")

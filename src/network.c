@@ -168,7 +168,8 @@ static int valid_hello(const connection_state *state, const char *body)
     errno = 0;
     char *end;
     intmax_t value = strtoimax(limit, &end, 10);
-    return !errno && !*end && value == state->runtime->config.limit_cent &&
+    /* El límite anunciado es local al par, no una condición de pertenencia a la cadena. */
+    return !errno && !*end && value > 0 && value <= INT64_MAX &&
            !strcmp(chain, state->runtime->config.chain_id) && !strcmp(identity, state->runtime->peer.id);
 }
 

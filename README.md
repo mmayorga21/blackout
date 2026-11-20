@@ -39,7 +39,7 @@ Formato: una `clave=valor` por línea, espacios exteriores opcionales, comentari
 | chain_id | Mismo formato; `none` identifica una tienda independiente y se reserva para ese uso. |
 | bind_address | Dirección IPv4 literal; los ejemplos usan loopback para pruebas locales. |
 | port | Entero de 1 a 65535. Para pruebas sin privilegios usar puertos mayores que 1023. |
-| limit_cent | Entero positivo representable en 64 bits con signo, en centavos. 100000 equivale a 1000,00 unidades monetarias. |
+| limit_cent | Límite de ingresos propios de esta tienda, entero positivo en centavos. 100000 equivale a 1000,00 unidades monetarias. Cada integrante puede tener un valor diferente. |
 | timeout_ms | Entero de 1 a 3600000 milisegundos. |
 | queue_capacity | Entero de 1 a 1000000 elementos. |
 | data_dir | Ruta no vacía de hasta 255 bytes; cada tienda necesita una propia. |
@@ -70,7 +70,7 @@ El catálogo usa una línea `ID IPv4 PUERTO` por tienda, incluida la propia. Req
 
 Cada cadena usa tres hilos: recepción de consola, trabajador contable y red. El trabajador registra compras y ventas remotas en la misma cola. Solo él modifica el historial y sus índices. La red conserva una copia protegida de los eventos ya registrados y utiliza sockets no bloqueantes, `poll` y una tubería de notificación. Si la cola está llena conserva una solicitud remota y pausa la lectura; continúa atendiendo envíos y notificaciones, sin esperar espacio bloqueando el hilo de red.
 
-Ambas tiendas escuchan y la de identidad lexicográficamente menor inicia la conexión. Esta regla evita conexiones duplicadas. La identificación inicial comprueba versión, cadena, identidad del par y límite. El protocolo está pensado para los pares de confianza configurados en el laboratorio; la identificación no es autenticación criptográfica.
+Ambas tiendas escuchan y la de identidad lexicográficamente menor inicia la conexión. Esta regla evita conexiones duplicadas. La identificación inicial comprueba versión, cadena e identidad del par. El límite anunciado debe ser un entero válido, pero no tiene que coincidir con el local ni modifica su configuración. El protocolo está pensado para los pares de confianza configurados en el laboratorio; la identificación no es autenticación criptográfica.
 
 Los mensajes tienen cabecera de 12 bytes: magic BLK6, versión 1, tipo, dos bytes reservados y longitud de cuerpo en orden de red. El cuerpo debe ser menor de 256 bytes. HELLO intercambia identidad/cadena/límite, SALE contiene una fila CSV de venta, ACK confirma un ID guardado, PING/PONG comprueban comunicación y REJECT informa rechazo. Se manejan mensajes fragmentados o agrupados y envíos parciales. Los plazos de conexión, confirmación y reconexión proceden de `timeout_ms`; el latido usa la mitad de ese plazo. El formato exacto puede evolucionar al incorporar el recorrido de la etapa 7.
 
@@ -78,9 +78,9 @@ El origen guarda y sincroniza antes de compartir. El receptor confirma únicamen
 
 Al reconectar se reenvía el historial completo de eventos registrados. Un índice por ID evita duplicaciones; el receptor conserva las fechas e importes del origen. Las confirmaciones y el avance de esta conexión se mantienen en memoria: al reiniciar se reconstruye la entrega reenviando desde el CSV durable. `estado` muestra conexión y entregas todavía sin confirmar en esa conexión. Que se hayan recibido los mismos eventos no garantiza que ambas tiendas observen simultáneamente todas las confirmaciones.
 
-La primera versión intercambia historiales completos en cada reconexión; la optimización por inventarios y la validación exhaustiva de apagones quedan para la etapa 8. El funcionamiento eventual presupone comunicación recuperada, capacidad de almacenamiento y participantes que regresan. No hay coordinación global de compras: durante una desconexión una tienda puede desconocer ventas que después harán superar el límite.
+La primera versión intercambia historiales completos en cada reconexión; la optimización por inventarios y la validación exhaustiva de apagones quedan para la etapa 8. El funcionamiento eventual presupone comunicación recuperada, capacidad de almacenamiento y participantes que regresan. Los ingresos de cadena son información compartida y no se comparan con el límite local para autorizar compras.
 
-Al alcanzar el límite, las compras propias se rechazan y la consola permanece en SOLO_CONSULTA. La red continúa guardando y compartiendo ventas ya aceptadas por los participantes. `salir` detiene la red y deja procesar las solicitudes ya encoladas; los eventos sin confirmación permanecen en disco para el siguiente arranque. Esta etapa no implementa todavía el certificado de cierre distribuido.
+Cada tienda compara sus ingresos propios con su límite. Si A tiene límite 100000 y llega a 100000 de ventas propias, solo A pasa a SOLO_CONSULTA; B continúa vendiendo hasta alcanzar su propio límite. Esto se cumple también si ambas tienen el mismo valor configurado. A sigue recibiendo las ventas de B y actualizando los ingresos conocidos de cadena. La consola conserva historial y estado hasta salir manualmente. `salir` detiene la red y deja procesar las solicitudes ya encoladas; los eventos sin confirmación permanecen en disco para el siguiente arranque. Esta etapa no implementa todavía el certificado de cierre distribuido.
 
 Si la configuración es inválida, se muestra el error y se permite editar el archivo y pulsar Enter para volver a cargarlo. `q` cancela; con entrada estándar cerrada finaliza con estado de error. Los argumentos de línea de órdenes inválidos muestran el uso y devuelven error.
 
@@ -98,7 +98,7 @@ salir
 
 Los importes son centavos enteros positivos: `venta 1250` registra 12,50 unidades monetarias. Cada aceptación informa su ID, por ejemplo `D:1`. Se rechazan importes inválidos o que desborden la suma de 64 bits, y se permite ingresar otro comando. Un comando demasiado largo se descarta completo. El fin de entrada también termina ordenadamente.
 
-`estado` muestra estado comercial, cantidad de ventas, ingresos y límite. `historial` muestra cada venta con su identificador, fecha y hora con zona horaria e importe con dos decimales. Consultarlo no modifica los ingresos ni la siguiente secuencia.
+`estado` muestra estado comercial, cantidad de ventas registradas, ingresos propios y límite local. En cadenas, otra línea distingue los ingresos propios del total conocido de cadena. La cantidad de ventas registradas incluye eventos recibidos del par. `historial` muestra cada venta con su identificador, fecha y hora con zona horaria e importe con dos decimales. Consultarlo no modifica los ingresos ni la siguiente secuencia.
 
 `salir` termina el proceso ordenadamente y conserva el historial. Una venta que alcance o supere el límite se conserva completa y cambia el estado a `SOLO_CONSULTA`: se rechazan nuevas compras, pero `estado`, `historial`, `ayuda` y `salir` continúan disponibles. La aplicación no termina por alcanzar el límite. Al reiniciar con ese historial vuelve a abrir la consola en modo de solo consulta. Si aún no se alcanzó el límite, inicia en `ABIERTA` y permite seguir vendiendo.
 

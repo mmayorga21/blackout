@@ -15,9 +15,14 @@ int store_open(local_store *store, const store_config *config)
     return journal_open(&store->journal, config);
 }
 
+static int64_t own_income(const local_store *store)
+{
+    return store->journal.chain ? store->journal.own_total_cent : store->journal.total_cent;
+}
+
 int store_at_limit(const local_store *store)
 {
-    return store->journal.total_cent >= store->config.limit_cent;
+    return own_income(store) >= store->config.limit_cent;
 }
 
 void store_status(const local_store *store)
@@ -25,7 +30,7 @@ void store_status(const local_store *store)
     printf("Estado: %s | Tienda: %s | Ventas: %" PRIu64 " | Ingresos: %" PRId64
            " centavos | Límite: %" PRId64 " centavos\n",
            store->storage_failed ? "ERROR_ALMACENAMIENTO" : store_at_limit(store) ? "SOLO_CONSULTA" : "ABIERTA",
-           store->config.store_id, store->journal.count, store->journal.total_cent, store->config.limit_cent);
+           store->config.store_id, store->journal.count, own_income(store), store->config.limit_cent);
     if (store->journal.chain)
         printf("Cadena: %s | Ingresos propios: %" PRId64 " | Ingresos conocidos de cadena: %" PRId64 " centavos\n",
                store->config.chain_id, store->journal.own_total_cent, store->journal.total_cent);
