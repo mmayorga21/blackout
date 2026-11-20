@@ -23,7 +23,7 @@ void store_status(const local_store *store)
 {
     printf("Estado: %s | Tienda: %s | Ventas: %" PRIu64 " | Ingresos: %" PRId64
            " centavos | Límite: %" PRId64 " centavos\n",
-           store->storage_failed ? "ERROR_ALMACENAMIENTO" : store_at_limit(store) ? "CERRADA" : "ABIERTA",
+           store->storage_failed ? "ERROR_ALMACENAMIENTO" : store_at_limit(store) ? "SOLO_CONSULTA" : "ABIERTA",
            store->config.store_id, store->journal.count, store->journal.total_cent, store->config.limit_cent);
 }
 
@@ -31,7 +31,7 @@ int store_sell(local_store *store, int64_t amount)
 {
     if (store->storage_failed || store_at_limit(store) || amount <= 0 ||
         amount > INT64_MAX - store->journal.total_cent || store->journal.count == UINT64_MAX) {
-        fputs("Venta rechazada: tienda cerrada, importe inválido o desbordamiento.\n", stderr);
+        fputs("Venta rechazada: ventas deshabilitadas, importe inválido o desbordamiento.\n", stderr);
         return 1;
     }
     if (journal_append(&store->journal, amount) < 0) {

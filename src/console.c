@@ -31,7 +31,7 @@ typedef struct {
 
 static void wake_receiver(console_runtime *runtime)
 {
-    /* Se emite como máximo una notificación por límite y otra por error. */
+    /* Un error detiene la instancia; alcanzar el límite solo deshabilita ventas. */
     ssize_t n;
     do { n = write(runtime->wake[1], "x", 1); } while (n < 0 && errno == EINTR);
     if (n != 1) {
@@ -64,8 +64,9 @@ static void *process_requests(void *argument)
                 runtime->worker_result = -1;
                 stop_worker(runtime, QUEUE_ERROR);
             } else if (result == 0) {
-                if (store_at_limit(runtime->store)) stop_worker(runtime, QUEUE_LIMIT);
                 store_status(runtime->store);
+                if (store_at_limit(runtime->store))
+                    puts("Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
             }
             break;
         }
@@ -85,8 +86,6 @@ static void *process_requests(void *argument)
         }
     }
     reason = queue_reason(&runtime->queue);
-    if (reason == QUEUE_LIMIT)
-        puts("Límite alcanzado: tienda cerrada; no se aceptan compras nuevas.");
     if (reason == QUEUE_ERROR) runtime->worker_result = -1;
     return NULL;
 }
@@ -181,8 +180,7 @@ int console_run(local_store *store)
     puts("Comandos: venta CENTAVOS | estado | historial | ayuda | salir");
     store_status(store);
     if (store_at_limit(store)) {
-        puts("Límite alcanzado: tienda cerrada; no se aceptan compras nuevas.");
-        return 0;
+        puts("Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
     }
     console_runtime runtime = { .store = store };
     if (queue_init(&runtime.queue, store->config.queue_capacity) < 0) { perror("Crear cola"); return -1; }

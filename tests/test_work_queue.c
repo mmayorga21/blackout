@@ -85,7 +85,7 @@ static void stop_full(int finish)
     pthread_t producer;
     CHECK(pthread_create(&producer, NULL, put_one, &argument) == 0);
     if (finish) queue_finish(&queue);
-    else queue_stop(&queue, QUEUE_LIMIT);
+    else queue_stop(&queue, QUEUE_STOPPED);
     CHECK(pthread_join(producer, NULL) == 0 && argument.result == 1);
     queue_stop_reason reason;
     CHECK(queue_take(&queue, &request, &reason) == 0 && request.amount == 1);
@@ -107,7 +107,7 @@ int main(void)
     queue_finish(&queue);
     CHECK(pthread_join(consumer, NULL) == 0 && argument.result == 1);
     queue_stop(&queue, QUEUE_ERROR);
-    queue_stop(&queue, QUEUE_LIMIT);
+    queue_stop(&queue, QUEUE_STOPPED);
     CHECK(queue_reason(&queue) == QUEUE_ERROR);
     queue_destroy(&queue);
     puts("Cola concurrente: 16000 solicitudes, FIFO por productor y cierres verificados.");

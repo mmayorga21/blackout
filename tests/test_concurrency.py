@@ -39,7 +39,7 @@ class ConcurrentStore(unittest.TestCase):
         with (self.data / "sales.csv").open() as file:
             return list(csv.DictReader(file))
 
-    def start(self, fault=None):
+    def start(self, fault=None, expected_state=b"Estado: ABIERTA"):
         env = os.environ.copy()
         if fault:
             env["LD_PRELOAD"] = "$ORIGIN/../build/fault_io.so"
@@ -52,7 +52,7 @@ class ConcurrentStore(unittest.TestCase):
         try:
             selector.register(process.stdout, selectors.EVENT_READ)
             output = b""
-            while b"Estado: ABIERTA" not in output:
+            while expected_state not in output:
                 self.assertTrue(selector.select(5), "No se abrió la tienda")
                 chunk = os.read(process.stdout.fileno(), 4096)
                 self.assertTrue(chunk)
@@ -87,15 +87,57 @@ class ConcurrentStore(unittest.TestCase):
         self.assertIn("Ventas: 51 | Ingresos: 157", result.stdout)
         self.assertIn("Fin de entrada", result.stdout)
 
-    def test_limit_exits_with_input_still_open_and_partial_next_command(self):
+    def read_until(self, process, marker):
+        selector = selectors.DefaultSelector()
+        output = b""
+        deadline = time.monotonic() + 5
+        try:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while marker not in output:
+                remaining = deadline - time.monotonic()
+                self.assertGreater(remaining, 0, output)
+                self.assertTrue(selector.select(remaining), output)
+                chunk = os.read(process.stdout.fileno(), 4096)
+                self.assertTrue(chunk, "La tienda terminó antes de responder")
+                output += chunk
+        finally:
+            selector.close()
+        return output
+
+    def test_limit_keeps_console_open_for_future_queries_until_manual_exit(self):
         self.configure(limit=100)
         process = self.start()
-        process.stdin.write(b"venta 100\nventa ")
-        # No enviar EOF ni más Enter: el trabajador debe despertar al receptor.
+        process.stdin.write(b"venta 100\n")
+        self.read_until(process, b"Estado: SOLO_CONSULTA")
+        original = (self.data / "sales.csv").read_bytes()
+        self.assertIsNone(process.poll())
+        # Consultas enviadas después de confirmar el límite, sin cerrar stdin.
+        process.stdin.write(b"historial\nestado\nventa 1\nhistorial\nayuda\n")
+        out = self.read_until(process, b"venta CENTAVOS | estado | historial | ayuda | salir\n")
+        self.assertEqual(out.count(b"D:1 |"), 2)
+        self.assertIn(b"Estado: SOLO_CONSULTA", out)
+        self.assertIsNone(process.poll())
+        process.stdin.write(b"salir\n")
+        process.wait(timeout=5)
+        final, err = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 0, final + err)
+        self.assertIn(b"Venta rechazada", err)
+        self.assertIn(b"Salida ordenada", final)
+        self.assertEqual((self.data / "sales.csv").read_bytes(), original)
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_restart_at_limit_keeps_console_available(self):
+        self.configure(limit=100)
+        self.assert_ok(self.run_store("venta 100\nsalir\n"))
+        process = self.start(expected_state=b"Estado: SOLO_CONSULTA")
+        process.stdin.write(b"historial\nestado\nventa 1\nsalir\n")
         process.wait(timeout=5)
         out, err = process.communicate(timeout=5)
         self.assertEqual(process.returncode, 0, out + err)
-        self.assertIn(b"Estado: CERRADA", out)
+        self.assertIn(b"D:1 |", out)
+        self.assertIn(b"Estado: SOLO_CONSULTA", out)
+        self.assertIn(b"Venta rechazada", err)
+        self.assertNotIn(b"Venta aceptada:", out)
         self.assertEqual(len(self.rows()), 1)
 
     def test_storage_failure_exits_with_input_still_open(self):

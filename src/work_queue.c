@@ -87,7 +87,7 @@ void queue_finish(work_queue *queue)
 void queue_stop(work_queue *queue, queue_stop_reason reason)
 {
     checked(pthread_mutex_lock(&queue->mutex));
-    /* Un fallo tiene prioridad sobre el límite; una detención nunca se revierte. */
+    /* Un fallo tiene prioridad sobre una detención normal; nunca se revierte. */
     if (reason > queue->stop) queue->stop = reason;
     checked(pthread_cond_broadcast(&queue->not_empty));
     checked(pthread_cond_broadcast(&queue->not_full));

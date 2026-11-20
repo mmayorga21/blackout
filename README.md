@@ -2,7 +2,7 @@
 
 Proyecto de Sistemas Operativos: tiendas que registran y comparten ventas sin servidor central y recuperan información después de apagones.
 
-Estado: etapa 5, tienda independiente con recepción y procesamiento concurrentes, historial CSV con fecha y hora, recuperación y cierre por límite. La comunicación entre tiendas, la lectura del catálogo de pares y las consultas remotas del gobierno todavía no están implementados.
+Estado: etapa 5, tienda independiente con recepción y procesamiento concurrentes, historial CSV con fecha y hora, recuperación y modo de solo consulta al alcanzar el límite. La comunicación entre tiendas, la lectura del catálogo de pares y las consultas remotas del gobierno todavía no están implementados.
 
 ## Compilación
 
@@ -65,7 +65,7 @@ Los importes son centavos enteros positivos: `venta 1250` registra 12,50 unidade
 
 `estado` muestra estado comercial, cantidad de ventas, ingresos y límite. `historial` muestra cada venta con su identificador, fecha y hora con zona horaria e importe con dos decimales. Consultarlo no modifica los ingresos ni la siguiente secuencia.
 
-`salir` conserva el historial y permite continuar en el siguiente arranque si todavía no se alcanzó el límite. Una venta que alcance o supere el límite se conserva completa y el proceso termina después de informar el estado CERRADA. Al reiniciar con ese historial permanece cerrada y no procesa nuevas compras.
+`salir` termina el proceso ordenadamente y conserva el historial. Una venta que alcance o supere el límite se conserva completa y cambia el estado a `SOLO_CONSULTA`: se rechazan nuevas compras, pero `estado`, `historial`, `ayuda` y `salir` continúan disponibles. La aplicación no termina por alcanzar el límite. Al reiniciar con ese historial vuelve a abrir la consola en modo de solo consulta. Si aún no se alcanzó el límite, inicia en `ABIERTA` y permite seguir vendiendo.
 
 Para consultar el historial sin aceptar compras, incluso después del cierre por límite:
 
@@ -83,9 +83,9 @@ Una cola circular de capacidad configurable usa un mutex y dos variables de cond
 
 Una solicitud encolada todavía no es una venta aceptada: la confirmación conserva el requisito de escritura y sincronización. `estado` e `historial` reflejan las solicitudes anteriores ya procesadas. `salir` deja terminar el trabajo anterior a ese comando e ignora lo que aparezca después en la entrada. El fin de entrada también drena la cola.
 
-Cuando se alcanza el límite, el trabajador detiene la recepción y rechaza las ventas pendientes sin escribirlas. Puede responder consultas que ya estaban encoladas antes de terminar. Ante fallo de almacenamiento o historial, se detiene y las ventas todavía pendientes se rechazan sin confirmación. Las líneas que no llegaron a encolarse no son operaciones aceptadas.
+Cuando se alcanza el límite, el trabajador rechaza las ventas pendientes o futuras sin escribirlas, pero la cola y la recepción siguen funcionando para atender consultas hasta `salir` o fin de entrada. Ante fallo de almacenamiento o historial, la instancia sí se detiene y las ventas todavía pendientes se rechazan sin confirmación. Las líneas que no llegaron a encolarse no son operaciones aceptadas.
 
-Una tubería notifica al receptor cuando el trabajador inicia el cierre. El receptor espera con `poll` sobre la entrada y esa tubería: puede despertar aunque el usuario no pulse Enter o haya una línea incompleta. La detención también despierta al productor si esperaba espacio en la cola. Se usa `pthread_join` antes de cerrar el historial y destruir mutex, condiciones y cola. En reposo ambos hilos esperan eventos, sin sondeo periódico.
+Una tubería notifica al receptor cuando el trabajador debe detener la instancia por un fallo. El receptor espera con `poll` sobre la entrada y esa tubería: puede despertar aunque el usuario no pulse Enter o haya una línea incompleta. La detención también despierta al productor si esperaba espacio en la cola. Se usa `pthread_join` antes de cerrar el historial y destruir mutex, condiciones y cola. En reposo ambos hilos esperan eventos, sin sondeo periódico. Alcanzar el límite no activa esa detención.
 
 ## Persistencia y recuperación
 

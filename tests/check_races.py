@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import shutil
+import selectors
 import subprocess
 import tempfile
 
@@ -36,20 +37,33 @@ with tempfile.TemporaryDirectory(prefix="blackout-races-") as folder:
         result = subprocess.run(PREFIX + [str(ROOT / "build/tsan/blackout"), "--config", str(config)],
                                 input=commands, capture_output=True, text=True, env=ENV, timeout=30)
         check(result)
-    # Cierre mientras el receptor espera una línea sin terminar y sin recibir EOF.
+    # Alcanzar el límite no termina el proceso; las consultas posteriores siguen operando.
     config = Path(folder) / "live.conf"
     config.write_text((ROOT / "config/tienda-d.conf").read_text()
                       .replace("data_dir=data/D", f"data_dir={folder}/live")
                       .replace("limit_cent=100000", "limit_cent=1"))
     process = subprocess.Popen(PREFIX + [str(ROOT / "build/tsan/blackout"), "--config", str(config)],
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, env=ENV)
+                               bufsize=0, env=ENV)
     try:
-        process.stdin.write("venta 1\nventa ")
-        process.stdin.flush()
-        process.wait(timeout=10)
-        out, err = process.communicate(timeout=5)
-        check(subprocess.CompletedProcess(process.args, process.returncode, out, err))
+        process.stdin.write(b"venta 1\n")
+        selector = selectors.DefaultSelector()
+        try:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            initial = b""
+            while b"Estado: SOLO_CONSULTA" not in initial:
+                if not selector.select(10):
+                    raise SystemExit("ThreadSanitizer: no se recibió el estado de solo consulta.")
+                chunk = os.read(process.stdout.fileno(), 4096)
+                if not chunk:
+                    raise SystemExit("La tienda terminó al alcanzar el límite.")
+                initial += chunk
+        finally:
+            selector.close()
+        out, err = process.communicate(b"historial\nestado\nventa 1\nsalir\n", timeout=10)
+        check(subprocess.CompletedProcess(process.args, process.returncode, out.decode(), err.decode()))
+        if b"D:1 |" not in out or b"Salida ordenada" not in out:
+            raise SystemExit("No se atendió el historial antes de la salida manual.")
     finally:
         if process.poll() is None:
             process.kill()

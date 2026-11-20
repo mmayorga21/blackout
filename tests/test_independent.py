@@ -67,18 +67,21 @@ class IndependentStore(unittest.TestCase):
         self.configure(limit=3000)
         result = self.run_store("venta 2500\nventa 1000\nventa 50\n")
         self.assert_ok(result)
-        self.assertIn("Estado: CERRADA", result.stdout)
+        self.assertIn("Estado: SOLO_CONSULTA", result.stdout)
         self.assertIn("Ventas: 2 | Ingresos: 3500", result.stdout)
-        restart = self.run_store("venta 100\n")
+        restart = self.run_store("venta 100\nestado\nhistorial\nayuda\nsalir\n")
         self.assert_ok(restart)
         self.assertNotIn("Venta aceptada:", restart.stdout)
         self.assertIn("Ventas: 2 | Ingresos: 3500", restart.stdout)
+        self.assertIn("D:1 |", restart.stdout)
+        self.assertIn("D:2 |", restart.stdout)
+        self.assertIn("Salida ordenada", restart.stdout)
 
     def test_exact_limit(self):
         self.configure(limit=1000)
         result = self.run_store("venta 1000\nventa 1\n")
         self.assert_ok(result)
-        self.assertIn("Estado: CERRADA", result.stdout)
+        self.assertIn("Estado: SOLO_CONSULTA", result.stdout)
         self.assertEqual(result.stdout.count("Venta aceptada:"), 1)
 
     def test_accumulation_overflow(self):

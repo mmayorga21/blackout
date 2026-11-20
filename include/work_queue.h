@@ -7,7 +7,7 @@
 
 typedef enum { REQUEST_SALE, REQUEST_STATUS, REQUEST_HISTORY, REQUEST_HELP } request_kind;
 typedef struct { request_kind kind; int64_t amount; } work_request;
-typedef enum { QUEUE_RUNNING, QUEUE_LIMIT, QUEUE_ERROR } queue_stop_reason;
+typedef enum { QUEUE_RUNNING, QUEUE_STOPPED, QUEUE_ERROR } queue_stop_reason;
 
 typedef struct {
     work_request *items;
