@@ -6,12 +6,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-int peers_load(const store_config *config, peer_config *other)
+int peers_load(const store_config *config, peer_catalog *catalog)
 {
     FILE *file = fopen(config->peers_file, "r");
     if (!file) { perror("Catálogo de pares"); return -1; }
     char line[256];
-    peer_config entries[2];
+    peer_config entries[PEERS_MAX];
     size_t count = 0;
     int failed = 0;
     while (fgets(line, sizeof line, file)) {
@@ -20,7 +20,7 @@ int peers_load(const store_config *config, peer_config *other)
         while (*start == ' ' || *start == '\t') start++;
         if (*start == '#' || *start == '\n' || !*start) continue;
         char id[33], address[16], port_text[16], extra;
-        if (count == 2 || sscanf(start, "%32s %15s %15s %c", id, address, port_text, &extra) != 3 ||
+        if (count == PEERS_MAX || sscanf(start, "%32s %15s %15s %c", id, address, port_text, &extra) != 3 ||
             !sale_identifier(id)) { failed = 1; break; }
         struct in_addr ipv4;
         if (inet_pton(AF_INET, address, &ipv4) != 1) { failed = 1; break; }
@@ -36,15 +36,18 @@ int peers_load(const store_config *config, peer_config *other)
     if (ferror(file)) failed = 1;
     if (fclose(file)) failed = 1;
     int own = -1;
-    if (count == 2 && strcmp(entries[0].id, entries[1].id) &&
-        (strcmp(entries[0].address, entries[1].address) || entries[0].port != entries[1].port)) {
-        for (size_t i = 0; i < 2; i++) if (!strcmp(entries[i].id, config->store_id)) own = (int)i;
+    for (size_t i = 0; i < count; i++) {
+        if (!strcmp(entries[i].id, config->store_id)) own = (int)i;
+        for (size_t j = 0; j < i; j++)
+            if (!strcmp(entries[i].id, entries[j].id) ||
+                (!strcmp(entries[i].address, entries[j].address) && entries[i].port == entries[j].port)) failed = 1;
     }
     if (failed || own < 0 || entries[own].port != config->port ||
         (strcmp(config->bind_address, "0.0.0.0") && strcmp(entries[own].address, config->bind_address))) {
-        fputs("Catálogo inválido: esta etapa requiere exactamente dos identidades y direcciones distintas, incluida la propia.\n", stderr);
+        fputs("Catálogo inválido: identidades y direcciones únicas, incluida la propia (máximo 32 tiendas).\n", stderr);
         return -1;
     }
-    *other = entries[1 - own];
+    memcpy(catalog->entries, entries, count * sizeof *entries);
+    catalog->count = count; catalog->own = (size_t)own;
     return 0;
 }

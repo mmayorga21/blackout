@@ -5,13 +5,21 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "sale.h"
+#include "route.h"
 
-typedef enum { REQUEST_SALE, REQUEST_STATUS, REQUEST_HISTORY, REQUEST_HELP, REQUEST_REMOTE } request_kind;
+typedef enum { REQUEST_SALE, REQUEST_STATUS, REQUEST_HISTORY, REQUEST_HELP, REQUEST_REMOTE, REQUEST_PROGRESS } request_kind;
 typedef struct {
     request_kind kind;
     int64_t amount;
     char sale_csv[SALE_CSV_SIZE];
     uint64_t connection;
+    unsigned int connection_slot;
+    char sender[33];
+    int normal;
+    char route_wire[ROUTE_WIRE_SIZE];
+    size_t target;
+    uint64_t route_version;
+    char progress;
 } work_request;
 typedef enum { QUEUE_RUNNING, QUEUE_STOPPED, QUEUE_ERROR } queue_stop_reason;
 

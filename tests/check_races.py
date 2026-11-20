@@ -70,11 +70,20 @@ with tempfile.TemporaryDirectory(prefix="blackout-races-") as folder:
             process.communicate(timeout=5)
 print("ThreadSanitizer: cola y cuatro escenarios de tienda sin diagnósticos de carreras.")
 
-for pattern in ("simultaneous", "offline_sales", "remote_limit", "short_delay"):
+for pattern in ("simultaneous", "offline_sales", "remote_limit", "short_share"):
     result = subprocess.run(["python3", "-m", "unittest", "discover", "-s", str(ROOT / "tests"),
                              "-p", "test_network.py", "-k", pattern, "-v"],
                             env={**ENV, "BLACKOUT_NETWORK_TEST_BINARY": str(ROOT / "build/tsan/blackout"),
                                  "BLACKOUT_NETWORK_TEST_TSAN": "1"},
                             capture_output=True, text=True, timeout=45)
     check(result)
-print("ThreadSanitizer: ventas simultáneas, reconexión, límite y atraso entre dos tiendas sin diagnósticos de carreras.")
+print("ThreadSanitizer: ventas simultáneas, reconexión, límite y espera de envío sin diagnósticos de carreras.")
+
+for pattern in ("dynamic_discovery", "simultaneous_origins", "skip_unavailable", "recovery_cannot"):
+    result = subprocess.run(["python3", "-m", "unittest", "discover", "-s", str(ROOT / "tests"),
+                             "-p", "test_multi_store.py", "-k", pattern, "-v"],
+                            env={**ENV, "BLACKOUT_NETWORK_TEST_BINARY": str(ROOT / "build/tsan/blackout"),
+                                 "BLACKOUT_NETWORK_TEST_TSAN": "1"},
+                            capture_output=True, text=True, timeout=60)
+    check(result)
+print("ThreadSanitizer: descubrimiento, ventas simultáneas, reincorporación y turnos de recuperación sin diagnósticos de carreras.")

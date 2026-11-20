@@ -13,6 +13,7 @@ typedef struct {
     int64_t total_cent;
     int64_t own_total_cent;
     uint64_t own_sequence;
+    int fresh_history;
 } sales_journal;
 
 int journal_open(sales_journal *journal, const store_config *config);

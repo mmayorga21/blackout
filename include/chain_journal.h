@@ -9,6 +9,7 @@ int chain_local(sales_journal *journal, int64_t amount);
 /* 0 nueva; 1 duplicada; 2 inválida/conflicto; -1 fallo de almacenamiento. */
 int chain_receive(sales_journal *journal, const sale_record *sale);
 int chain_record(const sales_journal *journal, size_t index, sale_record *sale);
+int chain_lookup(const sales_journal *journal, const char *id, sale_record *sale);
 int chain_history(const sales_journal *journal);
 int chain_close(sales_journal *journal);
 

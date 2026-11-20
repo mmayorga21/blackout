@@ -52,9 +52,9 @@ int config_load(const char *path, store_config *config, FILE *errors)
 {
     static const char *keys[] = {
         "store_id", "chain_id", "bind_address", "port", "limit_cent",
-        "timeout_ms", "queue_capacity", "data_dir", "peers_file", "network_delay_ms"
+        "timeout_ms", "queue_capacity", "data_dir", "peers_file", "sale_share_delay_ms"
     };
-    store_config candidate = { .network_delay_ms = 10000 };
+    store_config candidate = { .sale_share_delay_ms = 5000 };
     unsigned int seen = 0;
     unsigned int line_number = 0;
     int failed = 0;
@@ -137,7 +137,7 @@ int config_load(const char *path, store_config *config, FILE *errors)
             break;
         case 9:
             result = number(value, 0, 60000, &numeric);
-            if (result == 0) candidate.network_delay_ms = (unsigned int)numeric;
+            if (result == 0) candidate.sale_share_delay_ms = (unsigned int)numeric;
             break;
         }
         if (result != 0) {

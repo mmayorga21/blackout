@@ -111,7 +111,7 @@ class TwoStores(unittest.TestCase):
         text = text.replace("port=5101", f"port={self.ports[name]}")
         text = text.replace("limit_cent=100000", f"limit_cent={limit}")
         text = text.replace("timeout_ms=2000", f"timeout_ms={timeout}")
-        text = text.replace("network_delay_ms=10000", f"network_delay_ms={delay}")
+        text = text.replace("sale_share_delay_ms=5000", f"sale_share_delay_ms={delay}")
         text = text.replace("queue_capacity=256", f"queue_capacity={capacity}")
         text = text.replace("data_dir=data/demo-dos/A", f"data_dir={self.folder}/{name}")
         text = text.replace("peers_file=config/demo-dos/cadena-x.peers", f"peers_file={self.peers}")
@@ -380,39 +380,46 @@ class TwoStores(unittest.TestCase):
         self.assertNotIn(b"Venta remota registrada:", b.output)
         self.assertIn(b"Guardar venta remota", b.errors)
 
-    def test_catalog_requires_exactly_two_stores(self):
-        self.peers.write_text(self.peers.read_text() + "C 127.0.0.1 5103\n")
+    def test_catalog_rejects_duplicate_store_identity(self):
+        self.peers.write_text(self.peers.read_text() + "A 127.0.0.1 5103\n")
         result = subprocess.run(PREFIX + [str(BINARY), "--config", str(self.folder / "A.conf")],
                                 input=b"salir\n", capture_output=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b"exactamente dos", result.stderr)
+        self.assertIn("Catálogo inválido".encode(), result.stderr)
         self.assertFalse((self.folder / "A/sales.csv").exists())
 
-    def test_ten_second_default_delay_preserves_local_responsiveness(self):
+    def test_five_second_default_delay_preserves_local_responsiveness(self):
         for name in "AB":
             path = self.configure(name, capacity=32, timeout=250)
-            # Omitir la opción comprueba también el valor predeterminado de 10 segundos.
-            path.write_text(path.read_text().replace("network_delay_ms=0\n", ""))
+            # Omitir la opción comprueba también el valor predeterminado de 5 segundos.
+            path.write_text(path.read_text().replace("sale_share_delay_ms=0\n", ""))
+        connection_started = time.monotonic()
         a, b = self.start("A"), self.start("B")
-        self.until(lambda: all("Conexión de cadena establecida".encode() in s.errors for s in (a, b)), timeout=20)
+        self.until(lambda: all("Conexión de cadena establecida".encode() in s.errors for s in (a, b)), timeout=3)
+        self.assertLess(time.monotonic() - connection_started, 3)
         started = time.monotonic()
-        a.send("venta 1250\n")
-        self.until(lambda: b"Venta aceptada:" in a.output, timeout=5)
-        self.assertLess(time.monotonic() - started, 5)
+        a.send("venta 1250\nventa 50\nventa 100\n")
+        self.until(lambda: a.output.count(b"Venta aceptada:") == 3, timeout=3)
+        self.assertLess(time.monotonic() - started, 3)
         self.assertEqual(self.rows("B"), [])
-        self.assertIn("Atraso de recepción: 10000 ms".encode(), self.query(a))
+        self.query(a)
         self.assertEqual(self.rows("B"), [])
-        self.until(lambda: self.synchronized(1), timeout=20)
-        self.assertGreaterEqual(time.monotonic() - started, 9.9)
+        self.until(lambda: self.synchronized(3), timeout=10)
+        self.assertGreaterEqual(time.monotonic() - started, 4.9)
+        self.assertLess(time.monotonic() - started, 8)
+        # No esperar otros cinco segundos para recibir la confirmación.
+        ack_deadline = time.monotonic() + 2
+        while "Entregas sin confirmar en esta conexión: 0".encode() not in self.query(a).split(b"Par:")[-1]:
+            self.assertLess(time.monotonic(), ack_deadline)
         for store in (a, b):
             self.assertNotIn("Se perdió la conexión".encode(), store.errors)
             self.assertIsNone(store.process.poll())
 
-    def test_short_delay_ack_round_trip_does_not_cause_false_disconnects(self):
+    def test_short_share_wait_does_not_delay_control_traffic(self):
         for name in "AB":
-            # 200 ms sigue siendo menor que el RTT simulado de 300 ms, pero deja
-            # margen para fsync y la instrumentación de ThreadSanitizer.
-            self.configure(name, capacity=32, delay=150, timeout=200)
+            # La etapa de recorridos añade sincronizaciones de control a disco.
+            # La espera sigue siendo previa al envío, sin atrasar los ACK.
+            self.configure(name, capacity=32, delay=150, timeout=1000)
         a, b = self.start("A"), self.start("B")
         self.until(lambda: all("Conexión de cadena establecida".encode() in s.errors for s in (a, b)))
         a.send("venta 100\n")
@@ -423,6 +430,20 @@ class TwoStores(unittest.TestCase):
             while "Entregas sin confirmar en esta conexión: 0".encode() not in self.query(store).split(b"Par:")[-1]:
                 self.assertLess(time.monotonic(), deadline)
             self.assertNotIn("Se perdió la conexión".encode(), store.errors)
+
+    def test_received_sale_and_ack_immediate_despite_five_second_share_wait(self):
+        self.configure("B", delay=5000)
+        b = self.start("B")
+        started = time.monotonic()
+        sock = self.raw_peer()
+        self.assertLess(time.monotonic() - started, 2)
+        sock.settimeout(2)
+        started = time.monotonic()
+        sock.sendall(wire(2, csv_sale()))
+        self.responses(sock, 3)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(len(self.rows("B")), 1)
+        self.assertIsNone(b.process.poll())
 
     def test_graceful_disconnect_notifies_remaining_store_once(self):
         a, b = self.start("A"), self.start("B")
@@ -454,11 +475,11 @@ class TwoStores(unittest.TestCase):
         for value in ("-1", "60001", "1.5", "no"):
             with self.subTest(value=value):
                 path = self.configure("A")
-                path.write_text(path.read_text().replace("network_delay_ms=0", f"network_delay_ms={value}"))
+                path.write_text(path.read_text().replace("sale_share_delay_ms=0", f"sale_share_delay_ms={value}"))
                 result = subprocess.run(PREFIX + [str(BINARY), "--config", str(path)],
                                         input=b"q\n", capture_output=True, timeout=5)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("valor inválido para network_delay_ms".encode(), result.stderr)
+                self.assertIn("valor inválido para sale_share_delay_ms".encode(), result.stderr)
 
 
 if __name__ == "__main__":

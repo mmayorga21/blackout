@@ -50,11 +50,7 @@ int store_sell(local_store *store, int64_t amount)
         store->storage_failed = 1;
         return -1;
     }
-    if (store->journal.chain) {
-        sale_record sale;
-        if (chain_record(&store->journal, (size_t)store->journal.count - 1, &sale) < 0) return -1;
-        printf("Venta aceptada: %s | Importe: %" PRId64 " centavos\n", sale.id, amount);
-    } else printf("Venta aceptada: %s:%" PRIu64 " | Importe: %" PRId64 " centavos\n",
+    if (!store->journal.chain) printf("Venta aceptada: %s:%" PRIu64 " | Importe: %" PRId64 " centavos\n",
                   store->config.store_id, store->journal.count, amount);
     return 0;
 }

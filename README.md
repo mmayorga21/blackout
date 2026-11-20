@@ -2,7 +2,7 @@
 
 Proyecto de Sistemas Operativos: tiendas que registran y comparten ventas sin servidor central y recuperan información después de apagones.
 
-Estado: etapa 6, tiendas independientes y cadenas de exactamente dos tiendas con comunicación TCP, ventas compartidas, reconexión y deduplicación. Se conserva el historial CSV y el modo de solo consulta al alcanzar el límite. El orden entre múltiples tiendas y las consultas remotas del gobierno todavía no están implementados.
+Estado: etapa 7, tiendas independientes y cadenas de hasta 32 tiendas con comunicación TCP, incorporación lógica, ventas con recorrido ordenado, reconexión y deduplicación. Se conserva el historial CSV y el modo de solo consulta al alcanzar el límite propio. Las consultas remotas del gobierno y el certificado de cierre distribuido quedan pendientes.
 
 ## Compilación
 
@@ -29,7 +29,7 @@ make run
 make run CONFIG=config/tienda-d.conf
 ```
 
-`config/tienda-d.conf` inicia D independiente. `config/demo-dos/` contiene una demostración ejecutable de A y B de la cadena X, con puertos y datos separados. Los ejemplos originales A/B/C y su catálogo de tres tiendas quedan para la etapa 7: actualmente se rechaza un catálogo con más de dos integrantes.
+`config/tienda-d.conf` inicia D independiente. `config/demo-dos/` contiene una demostración ejecutable de A y B de la cadena X, con puertos y datos separados. `config/demo-tres/` contiene una demostración de A, B y C con datos propios. Los ejemplos originales `config/tienda-a.conf`, B y C también admiten su catálogo de tres integrantes.
 
 Formato: una `clave=valor` por línea, espacios exteriores opcionales, comentarios en líneas que comienzan con `#`. No se admiten claves repetidas, desconocidas o faltantes. Las rutas no usan comillas y se interpretarán respecto al directorio de ejecución.
 
@@ -41,10 +41,10 @@ Formato: una `clave=valor` por línea, espacios exteriores opcionales, comentari
 | port | Entero de 1 a 65535. Para pruebas sin privilegios usar puertos mayores que 1023. |
 | limit_cent | Límite de ingresos propios de esta tienda, entero positivo en centavos. 100000 equivale a 1000,00 unidades monetarias. Cada integrante puede tener un valor diferente. |
 | timeout_ms | Entero de 1 a 3600000 milisegundos. |
-| network_delay_ms | Opcional, atraso simulado de recepción por mensaje: de 0 a 60000 ms. Si se omite, usa 10000 ms (10 segundos). No afecta a la tienda independiente. |
+| sale_share_delay_ms | Opcional, espera antes de compartir una venta propia nueva: de 0 a 60000 ms. Si se omite, usa 5000 ms (5 segundos). No afecta a la tienda independiente. |
 | queue_capacity | Entero de 1 a 1000000 elementos. |
 | data_dir | Ruta no vacía de hasta 255 bytes; cada tienda necesita una propia. |
-| peers_file | Catálogo de exactamente dos tiendas para una cadena; `none` para D. |
+| peers_file | Catálogo inicial de 1 a 32 tiendas, incluida la propia; `none` para una independiente. |
 
 `queue_capacity` determina la capacidad de la cola local; su memoria se reserva al abrir la consola. Los demás límites máximos son restricciones de formato. La tienda independiente requiere `chain_id=none` y `peers_file=none`. En una cadena se validan el catálogo, las identidades, IPv4 y puertos; un fallo de bind impide iniciar el servicio de red. La identidad propia y su puerto deben coincidir con el catálogo; `0.0.0.0` permite escuchar en todas las interfaces.
 
@@ -65,25 +65,49 @@ En la segunda:
 
 Ingresa `venta 1000` en A y `venta 2500` en B. Después del intercambio, `estado` muestra ingresos propios de 1000 y 2500 respectivamente e ingresos conocidos de cadena de 3500 centavos en ambas. `historial` permite ver los dos eventos y sus fechas originales. Los CSV quedan en `data/demo-dos/A/` y `data/demo-dos/B/`; D conserva sus datos separados en `data/D/`.
 
-El catálogo usa una línea `ID IPv4 PUERTO` por tienda, incluida la propia. Requiere dos identidades y extremos distintos. Para computadoras diferentes, modifica direcciones y rutas de los ejemplos y usa el mismo catálogo en ambas. Las dos pueden empezar en cualquier orden y registrar compras sin que la otra esté conectada, sujetas al límite conocido localmente.
+El catálogo usa una línea `ID IPv4 PUERTO` por tienda, incluida la propia. Requiere identidades y extremos distintos. Para computadoras diferentes, modifica direcciones y rutas de los ejemplos y usa el mismo catálogo en ambas. Las tiendas pueden empezar en cualquier orden y registrar compras sin otros participantes conectados, sujetas a su propio límite.
+
+## Demostración con tres tiendas y recorrido
+
+Abre una terminal por tienda desde la raíz del repositorio:
+
+```sh
+./bin/blackout --config config/demo-tres/tienda-a.conf
+./bin/blackout --config config/demo-tres/tienda-b.conf
+./bin/blackout --config config/demo-tres/tienda-c.conf
+```
+
+Cada línea se ejecuta en una terminal diferente. Los datos quedan en `data/demo-tres/A`, B y C. Sus puertos son 5201, 5202 y 5203; pueden convivir con la demostración de dos tiendas, aunque representan cadenas de prueba separadas por sus catálogos y directorios. No mezcles esos catálogos durante una misma prueba.
+
+Inicia A, después B y finalmente C; comprueba conexiones y orden con `estado`. Si el orden conocido es A, B, C, una venta propia de B se registra en B, se envía a A y, tras su confirmación durable, se envía a C. El origen conduce el recorrido de sus propias ventas. Distintas ventas pueden intercalarse.
+
+Cada venta conserva una lista inmutable de destinatarios y sus incorporaciones, tomada de los pares conectados y con ticket definitivo al aceptarla. El siguiente paso solo se habilita tras persistir el ACK anterior o un salto por indisponibilidad. Si un destinatario cae, se espera el plazo configurado y se guarda el salto para continuar. No impide registrar otras ventas. Cuando regresa, una nueva ejecución recibe otra incorporación y un ticket posterior al máximo conocido por su contacto; recupera ventas pendientes mediante conciliación.
+
+La incorporación y el ticket persisten en `membership.log`. Los catálogos iniciales funcionan como semillas; el intercambio de miembros permite descubrir más tiendas y conservar sus direcciones para reinicios. Para añadir D, basta un catálogo inicial con D y un contacto accesible de su cadena. El máximo es 32 identidades históricas; no hay eliminación administrativa en esta etapa.
+
+El orden es lógico: ticket, identidad como desempate e incorporación para distinguir ejecuciones. Una reconexión de socket dentro de la misma ejecución conserva su posición. Una nueva ejecución obtiene posición posterior al máximo que conoce; con particiones no se promete una cronología física global. Los recorridos ya creados conservan su orden. La conciliación no permite aplicar anticipadamente una venta a un destinatario original cuyo turno sigue pendiente; un reincorporado o un participante que no estaba en el recorrido sí puede recuperarla.
+
+Si el origen cae a mitad del recorrido, lo reanuda al regresar desde el avance persistido. Otros orígenes continúan vendiendo. En esta versión no se transfiere la conducción del recorrido a otra tienda. Una venta solo almacenada en una computadora apagada no puede recuperarse hasta que esa computadora regrese.
 
 ## Ventas compartidas y red
 
 Cada cadena usa tres hilos: recepción de consola, trabajador contable y red. El trabajador registra compras y ventas remotas en la misma cola. Solo él modifica el historial y sus índices. La red conserva una copia protegida de los eventos ya registrados y utiliza sockets no bloqueantes, `poll` y una tubería de notificación. Si la cola está llena conserva una solicitud remota y pausa la lectura; continúa atendiendo envíos y notificaciones, sin esperar espacio bloqueando el hilo de red.
 
-Ambas tiendas escuchan y la de identidad lexicográficamente menor inicia la conexión. Esta regla evita conexiones duplicadas. La identificación inicial comprueba versión, cadena e identidad del par. El límite anunciado debe ser un entero válido, pero no tiene que coincidir con el local ni modifica su configuración. El protocolo está pensado para los pares de confianza configurados en el laboratorio; la identificación no es autenticación criptográfica.
+Cada tienda escucha y contacta a los participantes conocidos. Una conexión inicial también puede partir del ID mayor; las conexiones duplicadas se resuelven con una preferencia determinista por identidad. HELLO comprueba versión, cadena, identidad y dirección anunciada. El límite anunciado se valida, pero no modifica el límite propio. El protocolo confía en los pares del laboratorio; no hay autenticación criptográfica.
 
-Los mensajes tienen cabecera de 12 bytes: magic BLK6, versión 1, tipo, dos bytes reservados y longitud de cuerpo en orden de red. El cuerpo debe ser menor de 256 bytes. HELLO intercambia identidad/cadena/límite y atraso, SALE contiene una fila CSV de venta, ACK confirma un ID guardado, PING/PONG comprueban comunicación y REJECT informa rechazo. Se manejan mensajes fragmentados o agrupados y envíos parciales. Los plazos base de conexión, confirmación y reconexión proceden de `timeout_ms`, ajustados al atraso descrito a continuación. El formato exacto puede evolucionar al incorporar el recorrido de la etapa 7.
+Los mensajes tienen cabecera de 12 bytes: magic BLK6, versión 1, tipo, dos bytes reservados y longitud de cuerpo en orden de red. El cuerpo debe ser menor de 4096 bytes. HELLO intercambia identificación, incorporación, ticket y máximo lógico conocido; MEMBERS difunde el catálogo. SALE solicita aplicar el siguiente turno, RECOVER comparte una venta con evidencia de recorrido, ACK confirma un ID durable y DEFER indica un turno todavía no habilitado. PING/PONG comprueban comunicación; REJECT informa rechazo, NOTICE difunde pérdidas de conexión y BYE avisa una salida normal. Se manejan fragmentación, agrupación y envíos parciales. Los plazos de conexión, confirmación y reconexión proceden de `timeout_ms`; el latido usa la mitad de ese plazo.
 
-Cada mensaje completo recibido espera `network_delay_ms` antes de entregarse al protocolo. Las configuraciones de demostración y el valor predeterminado usan 10000 ms en ambas tiendas: HELLO, ventas, confirmaciones y latidos reciben 10 segundos de atraso por sentido. Una venta confirmada localmente sigue guardándose sin ese atraso; su recepción remota tarda al menos 10 segundos y su confirmación de ida y vuelta al menos 20. La cola de red conserva el orden y el trabajo pendiente puede añadir espera.
+Una venta propia se guarda y confirma localmente. A partir de ese registro se programa su envío para cinco segundos después, mediante `sale_share_delay_ms=5000` en las configuraciones de demostración y como valor predeterminado. Durante esa espera la consola, la recepción y las demás tareas continúan. Varias ventas pueden cumplir sus esperas en paralelo: no se añade una pausa de cinco segundos entre todos los mensajes.
 
-El atraso utiliza una cola limitada por `queue_capacity` y vencimientos de reloj monotónico, atendidos con `poll`; no duerme el hilo de consola ni el trabajador contable. HELLO anuncia además el atraso del receptor (un cuarto campo opcional; mensajes antiguos de tres campos anuncian cero). La espera de ACK suma los atrasos de ambos extremos a `timeout_ms`; el latido usa la mitad de ese plazo efectivo y la identificación permite el atraso local. Esto evita declarar una caída solo por la simulación. `estado` muestra el atraso configurado.
+La espera se asocia a cada venta propia nueva con un vencimiento de reloj monotónico, atendido con `poll`. No retrasa la conexión, los mensajes recibidos, los latidos ni las confirmaciones. Una vez cumplidos los cinco segundos, la venta se envía y el receptor confirma después de guardarla durablemente, sin otra espera artificial. La espera de ACK no empieza durante los cinco segundos previos. El parámetro anterior `network_delay_ms` se reemplaza por `sale_share_delay_ms`.
 
-Al perder una conexión establecida, la tienda que permanece activa muestra `Se perdió la conexión con la tienda A en la cadena X (...)`, identificando al par y la cadena. Se emite una vez por pérdida de conexión; los intentos fallidos de reconexión no repiten el aviso. Una nueva conexión vuelve a mostrar el mensaje de conexión establecida. El cierre del propio programa no anuncia falsamente que el otro par se apagó. La detección usa el cierre/error del socket o el vencimiento del plazo de respuesta: no depende de que el par pueda enviar un aviso antes de apagarse. Esta etapa sigue admitiendo exactamente dos tiendas por cadena.
+La reconexión durante la misma ejecución conserva el vencimiento ya programado. Al arrancar, el historial recuperado del CSV se habilita para reenvío sin imponer otra espera de cinco segundos; las ventas recibidas de otro participante también quedan disponibles sin una pausa adicional. El orden de envío y la disponibilidad del par pueden añadir espera real a una venta pendiente.
+
+Al perder una conexión establecida, la tienda que permanece activa muestra `Se perdió la conexión con la tienda A en la cadena X (...)`, identificando al par y la cadena. Se emite una vez por pérdida de conexión; los intentos fallidos de reconexión no repiten el aviso. Una nueva conexión vuelve a mostrar el mensaje de conexión establecida. El cierre del propio programa no anuncia falsamente que el otro par se apagó. La detección usa el cierre/error del socket o el vencimiento del plazo de respuesta: no depende de que el par pueda enviar un aviso antes de apagarse. Ese aviso se difunde a los demás participantes conectados de la cadena con deduplicación. Informa de una pérdida de enlace observada; no declara que el participante sea inaccesible desde toda la red. Un aviso recibido no derriba otra conexión saludable.
 
 El origen guarda y sincroniza antes de compartir. El receptor confirma únicamente después de guardar y sincronizar, o después de reconocer un duplicado ya registrado. El mismo ID con otro importe o fecha se rechaza. Una venta nueva aumenta ingresos conocidos de cadena; solo si su origen coincide con la tienda incrementa ingresos propios. La secuencia propia no depende del número de ventas ajenas.
 
-Al reconectar se reenvía el historial completo de eventos registrados. Un índice por ID evita duplicaciones; el receptor conserva las fechas e importes del origen. Las confirmaciones y el avance de esta conexión se mantienen en memoria: al reiniciar se reconstruye la entrega reenviando desde el CSV durable. `estado` muestra conexión y entregas todavía sin confirmar en esa conexión. Que se hayan recibido los mismos eventos no garantiza que ambas tiendas observen simultáneamente todas las confirmaciones.
+Al reconectar se reenvían eventos registrados con su evidencia de recorrido. Un índice por ID evita duplicaciones; el receptor conserva fechas e importes del origen. El avance del recorrido se conserva en `routes.log`; las confirmaciones de cada transporte se reconstruyen reenviando. `estado` muestra conexiones, entregas sin confirmar y orden lógico conocido. Recibir los mismos eventos no garantiza observar simultáneamente todas sus confirmaciones.
 
 La primera versión intercambia historiales completos en cada reconexión; la optimización por inventarios y la validación exhaustiva de apagones quedan para la etapa 8. El funcionamiento eventual presupone comunicación recuperada, capacidad de almacenamiento y participantes que regresan. Los ingresos de cadena son información compartida y no se comparan con el límite local para autorizar compras.
 
@@ -141,7 +165,11 @@ identificador,fecha_hora,valor_venta,crc32
 
 El campo `crc32` detecta daños sobre el texto de los otros tres campos; no autentica ventas. El CSV puede inspeccionarse con un editor o importarse en una hoja de cálculo, pero no debe editarse sobre el archivo de operación. Sus registros tienen un formato estricto; cambiar separadores, finales de línea o importes requiere recalcular la verificación y no es una operación soportada.
 
-`store.meta` conserva en texto la versión, identidad y límite con CRC32 y sirve de archivo de bloqueo. En cadenas también vincula el directorio a su cadena. Cambiar esos datos sobre el mismo directorio provoca rechazo. Cada cadena tiene además `period.id`, que conserva el período local y su CRC32. Un reinicio normal mantiene ese período y continúa la secuencia; un CSV nuevo crea un período distinto, evitando reutilizar IDs. No borres ni edites los metadatos de un historial existente.
+`store.meta` conserva en texto la versión, identidad y límite con CRC32 y sirve de archivo de bloqueo. En cadenas también vincula el directorio a su cadena. Cambiar esos datos sobre el mismo directorio provoca rechazo. Cada tienda de cadena tiene además `period.id`, que conserva el período local y su CRC32. Un reinicio normal mantiene ese período y continúa la secuencia; un CSV nuevo crea un período distinto, evitando reutilizar IDs. No borres ni edites los metadatos de un historial existente.
+
+En cadenas, `routes.log` guarda el recorrido inmutable y sus versiones de avance: P pendiente, A aplicada y S saltada. `membership.log` guarda incorporaciones, tickets y direcciones conocidas. Son registros de texto con CRC32, separados del CSV de ventas. Sus últimas filas incompletas se descartan al reiniciar; una fila completa dañada impide abrir. El salto no elimina la obligación de recuperación posterior.
+
+Una venta propia se confirma después de sincronizar el CSV y su recorrido. Estos dos archivos no forman una transacción atómica: si se interrumpe entre ambas escrituras, puede recuperarse una venta todavía no confirmada y sin recorrido, que se comparte como historial previo. Esta ventana y las campañas exhaustivas de apagones quedan para la etapa 8. Para historiales anteriores a esta etapa se crean recorridos vacíos de recuperación, sin inventar un orden pasado. Al eliminar intencionalmente el CSV, los recorridos previos se archivan como `routes.previous.<incorporación>.log`; los pares aún pueden devolver ventas antiguas.
 
 Las ventas se añaden al final mediante `write`, manejando escrituras parciales e interrupciones. Solo se confirman después de `fsync`. Al crear directorios y archivos también se sincronizan los directorios correspondientes. Esta decisión sigue las condiciones de durabilidad descritas en el [manual de fsync](https://man7.org/linux/man-pages/man2/fsync.2.html).
 
@@ -168,9 +196,9 @@ make race-check
 
 La batería usa procesos y directorios temporales, sin tocar `data/D`. Comprueba reinicios, secuencias, límites, desbordamiento, entradas inválidas, bloqueo entre instancias, interrupciones de escritura y detección de corrupción. Incluye lectura del CSV, fechas con zona, consulta tras cierre y migración sin duplicados ni alteración del respaldo. Un interpositor exclusivo de pruebas (`tests/fault_io.c`, compilado como `build/fault_io.so`) simula escrituras parciales, interrupciones, falta de espacio, fallos de sincronización y caídas antes de confirmar. Se carga únicamente mediante el entorno de los procesos de prueba, no se enlaza con el ejecutable normal.
 
-Las pruebas de concurrencia incluyen capacidad uno, disco lento, consultas ordenadas, cierre manual, ventas pendientes y espera en reposo. Una prueba en C utiliza cuatro productores y verifica 16000 solicitudes en dos tamaños de cola, sin pérdidas y con orden por productor. Las pruebas de red levantan dos procesos en puertos temporales y pares TCP controlados para verificar ventas simultáneas, fechas originales, reconexión, reinicio, cambios de período, límites, duplicados, conflictos, mensajes fragmentados/agrupados y fallos de almacenamiento remoto sin ACK falso. Se miden los 10 segundos reales de atraso y se comprueban avisos de desconexión normal/abrupta sin repeticiones ni falsos fallos por atraso. El resto de pruebas de red configura cero atraso para ejecutarse más rápido. Las pruebas tienen tiempos máximos para detectar bloqueos.
+Las pruebas de concurrencia incluyen capacidad uno, disco lento, consultas ordenadas, cierre manual, ventas pendientes y espera en reposo. Una prueba en C utiliza cuatro productores y verifica 16000 solicitudes en dos tamaños de cola, sin pérdidas y con orden por productor. Las pruebas de red levantan dos, tres y cuatro procesos en puertos temporales y pares TCP controlados para verificar ventas simultáneas, fechas originales, reconexión, reinicio, cambios de período, límites, duplicados, conflictos, mensajes fragmentados/agrupados y fallos de almacenamiento remoto sin ACK falso. Se miden los cinco segundos reales antes de compartir ventas nuevas, varias esperas paralelas y la ausencia de espera artificial en conexión, recepción y ACK. También se comprueban avisos de desconexión normal/abrupta sin repeticiones, recorrido ordenado, confirmación retenida, salto y reincorporación, reinicio del origen, descubrimiento desde una semilla y protección del turno frente a recuperación anticipada. Se validan colas incompletas y corrupción completa de los registros de control. Las pruebas generales configuran cero espera para ejecutarse más rápido. Las pruebas tienen tiempos máximos para detectar bloqueos.
 
-`make race-check` compila ejecutables separados bajo `build/tsan/` con ThreadSanitizer. Requiere que GCC disponga de ese runtime. Comprueba la cola, cuatro escenarios locales y cuatro escenarios entre dos tiendas, incluido atraso; no reemplaza las pruebas funcionales ni demuestra ausencia de carreras en todas las ejecuciones posibles. En este entorno el runtime necesita `setarch -R` para evitar un mapeo de memoria incompatible: el script lo aplica solo a los procesos de prueba, sin cambiar la configuración del sistema. Si el entorno no permite esa opción, la comprobación informa el fallo y no lo considera un resultado limpio.
+`make race-check` compila ejecutables separados bajo `build/tsan/` con ThreadSanitizer. Requiere que GCC disponga de ese runtime. Comprueba la cola, cuatro escenarios locales y cuatro escenarios entre dos tiendas y escenarios de tres/cuatro tiendas con incorporaciones, ventas simultáneas y recuperación; no reemplaza las pruebas funcionales ni demuestra ausencia de carreras en todas las ejecuciones posibles. En este entorno el runtime necesita `setarch -R` para evitar un mapeo de memoria incompatible: el script lo aplica solo a los procesos de prueba, sin cambiar la configuración del sistema. Si el entorno no permite esa opción, la comprobación informa el fallo y no lo considera un resultado limpio.
 
 ## Estructura
 
@@ -185,4 +213,4 @@ La guía de seguimiento de las etapas se conserva localmente en `docs/`, excluid
 
 ## Autoría
 
-La preparación del proyecto recibió asistencia de Codex, incluidos configuración, persistencia, concurrencia, comunicación de red y pruebas. La rúbrica del curso exige código no generado por IA: este trabajo no debe presentarse como código escrito íntegramente por el estudiante y tendrá que adecuarse a esa condición para la entrega.
+La preparación del proyecto recibió asistencia de Codex, incluidos configuración, persistencia, concurrencia, comunicación de red, membresía, recorridos y pruebas. La rúbrica del curso exige código no generado por IA: este trabajo no debe presentarse como código escrito íntegramente por el estudiante y tendrá que adecuarse a esa condición para la entrega.

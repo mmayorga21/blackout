@@ -7,8 +7,12 @@
 typedef struct network_runtime network_runtime;
 network_runtime *network_start(const store_config *config, const sales_journal *journal,
                                work_queue *queue, int console_wake);
-int network_publish(network_runtime *network, const sale_record *sale);
-void network_reply(network_runtime *network, uint64_t connection, const char *id, int accepted);
+/* Solo las ventas propias recién registradas esperan antes de compartirse. */
+int network_publish(network_runtime *network, const sale_record *sale, int defer);
+/* Resultados: 0 nueva, 1 duplicada, 2 conflicto, 3 turno diferido, -1 error. */
+int network_receive(network_runtime *network, const work_request *request, sales_journal *journal);
+int network_advance(network_runtime *network, const work_request *request);
+void network_reply(network_runtime *network, const work_request *request, const char *id, int result);
 void network_notify(network_runtime *network);
 void network_status(network_runtime *network);
 /* Detener/join antes de cerrar productores; liberar solo tras join del trabajador. */

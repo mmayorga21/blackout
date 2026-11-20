@@ -71,10 +71,10 @@ static void *process_requests(void *argument)
                 if (runtime->network) {
                     sale_record sale;
                     if (chain_record(&runtime->store->journal, (size_t)runtime->store->journal.count - 1, &sale) < 0 ||
-                        network_publish(runtime->network, &sale) < 0) {
+                        network_publish(runtime->network, &sale, 1) < 0) {
                         perror("Preparar entrega de venta durable");
                         runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
-                    }
+                    } else printf("Venta aceptada: %s | Importe: %" PRId64 " centavos\n", sale.id, sale.amount);
                 }
                 store_status(runtime->store);
                 if (store_at_limit(runtime->store))
@@ -102,8 +102,8 @@ static void *process_requests(void *argument)
                 runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR); break;
             }
             int was_at_limit = store_at_limit(runtime->store);
-            int result = chain_receive(&runtime->store->journal, &sale);
-            if (result < 0 || (result == 0 && network_publish(runtime->network, &sale) < 0)) {
+            int result = network_receive(runtime->network, &request, &runtime->store->journal);
+            if (result < 0) {
                 perror("Guardar venta remota");
                 runtime->store->storage_failed = 1;
                 runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
@@ -115,7 +115,14 @@ static void *process_requests(void *argument)
                 if (!was_at_limit && store_at_limit(runtime->store))
                     puts("Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
             } else if (result == 2) fputs("Venta remota rechazada: ID en conflicto, origen o importe inválidos.\n", stderr);
-            network_reply(runtime->network, request.connection, sale.id, result != 2);
+            network_reply(runtime->network, &request, sale.id, result);
+            break;
+        }
+        case REQUEST_PROGRESS: {
+            if (network_advance(runtime->network, &request) < 0) {
+                perror("Guardar avance de recorrido");
+                runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
+            }
             break;
         }
         }

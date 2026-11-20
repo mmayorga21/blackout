@@ -15,7 +15,6 @@ struct chain_data {
     size_t *index;
     size_t index_capacity;
     char period[33];
-    char other_id[33];
 };
 static const char header[] = "identificador,fecha_hora,valor_venta,crc32\n";
 
@@ -136,7 +135,7 @@ static void remember(sales_journal *journal, const sale_record *sale)
 
 static int allowed(const sales_journal *journal, const sale_record *sale)
 {
-    return (!strcmp(sale->origin, journal->store_id) || !strcmp(sale->origin, journal->chain->other_id)) &&
+    return sale_identifier(sale->origin) &&
            sale->amount > 0 && sale->amount <= INT64_MAX - journal->total_cent && journal->count < SIZE_MAX;
 }
 
@@ -215,11 +214,10 @@ int chain_open(sales_journal *journal, const store_config *config)
 {
     *journal = (sales_journal){ .fd = -1, .metadata_fd = -1, .legacy_fd = -1 };
     strcpy(journal->store_id, config->store_id);
-    peer_config peer;
-    if (peers_load(config, &peer) < 0) return -1;
+    peer_catalog catalog;
+    if (peers_load(config, &catalog) < 0) return -1;
     journal->chain = calloc(1, sizeof *journal->chain);
     if (!journal->chain) return -1;
-    strcpy(journal->chain->other_id, peer.id);
     int directory = -1, temporary = -1;
     if (directories(config->data_dir) < 0) goto failure;
     directory = open(config->data_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -244,6 +242,7 @@ int chain_open(sales_journal *journal, const store_config *config)
     if (journal->fd < 0 && errno != ENOENT) goto failure;
     if (journal->fd >= 0 && !n) { errno = EINVAL; goto failure; }
     int fresh = journal->fd < 0;
+    journal->fresh_history = fresh;
     if (period_file(directory, journal->chain, fresh) < 0) goto failure;
     if (fresh) {
         temporary = openat(directory, ".chain.csv.pending", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -295,6 +294,14 @@ int chain_record(const sales_journal *journal, size_t index, sale_record *sale)
 {
     if (index >= journal->count) return -1;
     *sale = journal->chain->records[index]; return 0;
+}
+
+int chain_lookup(const sales_journal *journal, const char *id, sale_record *sale)
+{
+    size_t position = find(journal, id);
+    if (position == SIZE_MAX) return 0;
+    if (sale) *sale = journal->chain->records[position];
+    return 1;
 }
 
 int chain_history(const sales_journal *journal)

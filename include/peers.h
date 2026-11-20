@@ -8,8 +8,9 @@ typedef struct {
     char address[16];
     unsigned int port;
 } peer_config;
-
-/* Etapa 6: catálogo completo de exactamente dos tiendas, incluida la propia. */
-int peers_load(const store_config *config, peer_config *other);
+enum { PEERS_MAX = 32 };
+typedef struct { peer_config entries[PEERS_MAX]; size_t count, own; } peer_catalog;
+/* El catálogo inicial contiene a la propia tienda y hasta 31 pares. */
+int peers_load(const store_config *config, peer_catalog *catalog);
 
 #endif
