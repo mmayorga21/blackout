@@ -2,7 +2,7 @@
 
 Proyecto de Sistemas Operativos: tiendas que registran y comparten ventas sin servidor central y recuperan información después de apagones.
 
-Estado: etapa 4, tienda independiente con ventas por consola, historial CSV con fecha y hora, recuperación y cierre por límite. Usa un solo hilo. La comunicación entre tiendas, los hilos de trabajo, la lectura del catálogo de pares y las consultas remotas del gobierno todavía no están implementados.
+Estado: etapa 5, tienda independiente con recepción y procesamiento concurrentes, historial CSV con fecha y hora, recuperación y cierre por límite. La comunicación entre tiendas, la lectura del catálogo de pares y las consultas remotas del gobierno todavía no están implementados.
 
 ## Compilación
 
@@ -45,7 +45,7 @@ Formato: una `clave=valor` por línea, espacios exteriores opcionales, comentari
 | data_dir | Ruta no vacía de hasta 255 bytes; cada tienda necesita una propia. |
 | peers_file | Ruta de hasta 255 bytes al catálogo previsto; `none` para D. Su contenido aún no se valida. |
 
-Los límites máximos son restricciones de formato de esta base; el programa todavía no reserva colas. La etapa de red validará el catálogo, la coherencia de cadena y la disponibilidad de puertos. La tienda independiente requiere `chain_id=none` y `peers_file=none`.
+`queue_capacity` determina la capacidad de la cola local; su memoria se reserva al abrir la consola. Los demás límites máximos son restricciones de formato. La etapa de red validará el catálogo, la coherencia de cadena y la disponibilidad de puertos. La tienda independiente requiere `chain_id=none` y `peers_file=none`.
 
 Si la configuración es inválida, se muestra el error y se permite editar el archivo y pulsar Enter para volver a cargarlo. `q` cancela; con entrada estándar cerrada finaliza con estado de error. Los argumentos de línea de órdenes inválidos muestran el uso y devuelven error.
 
@@ -74,6 +74,18 @@ Para consultar el historial sin aceptar compras, incluso después del cierre por
 ```
 
 La consulta abre y valida el almacenamiento y puede ejecutar la recuperación o migración inicial antes de mostrarlo.
+
+## Concurrencia local
+
+La consola usa dos hilos: el principal recibe y valida comandos; un trabajador procesa ventas, estado, historial y ayuda en orden FIFO. Solo el trabajador modifica las ventas, los ingresos y la secuencia durante la operación. La recuperación inicial y la consulta exclusiva con `--historial` se ejecutan antes o sin crear el trabajador.
+
+Una cola circular de capacidad configurable usa un mutex y dos variables de condición: el consumidor espera cuando está vacía y el productor cuando está llena. Las esperas comprueban su condición en un bucle. Las escrituras, `fsync` y la impresión del historial se ejecutan fuera del mutex de la cola. La recepción puede continuar mientras el trabajador guarda una venta, hasta llenar la cola. Una consulta extensa puede demorar solicitudes posteriores; la ejecución contable sigue siendo secuencial.
+
+Una solicitud encolada todavía no es una venta aceptada: la confirmación conserva el requisito de escritura y sincronización. `estado` e `historial` reflejan las solicitudes anteriores ya procesadas. `salir` deja terminar el trabajo anterior a ese comando e ignora lo que aparezca después en la entrada. El fin de entrada también drena la cola.
+
+Cuando se alcanza el límite, el trabajador detiene la recepción y rechaza las ventas pendientes sin escribirlas. Puede responder consultas que ya estaban encoladas antes de terminar. Ante fallo de almacenamiento o historial, se detiene y las ventas todavía pendientes se rechazan sin confirmación. Las líneas que no llegaron a encolarse no son operaciones aceptadas.
+
+Una tubería notifica al receptor cuando el trabajador inicia el cierre. El receptor espera con `poll` sobre la entrada y esa tubería: puede despertar aunque el usuario no pulse Enter o haya una línea incompleta. La detención también despierta al productor si esperaba espacio en la cola. Se usa `pthread_join` antes de cerrar el historial y destruir mutex, condiciones y cola. En reposo ambos hilos esperan eventos, sin sondeo periódico.
 
 ## Persistencia y recuperación
 
@@ -105,13 +117,18 @@ Las pruebas requieren además Python 3, sin paquetes externos:
 
 ```sh
 make test
+make race-check
 ```
 
 La batería usa procesos y directorios temporales, sin tocar `data/D`. Comprueba reinicios, secuencias, límites, desbordamiento, entradas inválidas, bloqueo entre instancias, interrupciones de escritura y detección de corrupción. Incluye lectura del CSV, fechas con zona, consulta tras cierre y migración sin duplicados ni alteración del respaldo. Un interpositor exclusivo de pruebas (`tests/fault_io.c`, compilado como `build/fault_io.so`) simula escrituras parciales, interrupciones, falta de espacio, fallos de sincronización y caídas antes de confirmar. Se carga únicamente mediante el entorno de los procesos de prueba, no se enlaza con el ejecutable normal.
 
+Las pruebas de concurrencia incluyen capacidad uno, disco lento, consultas ordenadas, cierre con entrada abierta, ventas pendientes y espera en reposo. Una prueba en C utiliza cuatro productores y verifica 16000 solicitudes en dos tamaños de cola, sin pérdidas y con orden por productor. Las pruebas tienen tiempos máximos para detectar bloqueos.
+
+`make race-check` compila ejecutables separados bajo `build/tsan/` con ThreadSanitizer. Requiere que GCC disponga de ese runtime. Comprueba la cola y cuatro escenarios de la tienda; no reemplaza las pruebas funcionales ni demuestra ausencia de carreras en todas las ejecuciones posibles. En este entorno el runtime necesita `setarch -R` para evitar un mapeo de memoria incompatible: el script lo aplica solo a los procesos de prueba, sin cambiar la configuración del sistema. Si el entorno no permite esa opción, la comprobación informa el fallo y no lo considera un resultado limpio.
+
 ## Estructura
 
-- `src/`: arranque, configuración, consola, reglas de tienda y registro durable.
+- `src/`: arranque, configuración, consola concurrente, cola, reglas de tienda y registro durable.
 - `include/`: declaraciones y tipos compartidos.
 - `config/`: ejemplos de tiendas y catálogo previsto.
 - `tests/`: pruebas de integración e inyector de fallos de E/S.

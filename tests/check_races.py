@@ -1,0 +1,57 @@
+"""Verificaciones instrumentadas con ThreadSanitizer, sin datos de operación."""
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+ENV = {**os.environ, "TSAN_OPTIONS": "halt_on_error=1:exitcode=66"}
+# El runtime de GCC en este entorno necesita evitar el mapeo aleatorio incompatible.
+# La opción se aplica únicamente a estos procesos hijos, no al sistema.
+PREFIX = ["setarch", os.uname().machine, "-R"] if shutil.which("setarch") else []
+
+
+def check(result):
+    if result.returncode != 0:
+        raise SystemExit(result.stdout + result.stderr)
+
+
+queue = subprocess.run(PREFIX + [str(ROOT / "build/tsan/test_work_queue")],
+                       capture_output=True, text=True, env=ENV, timeout=30)
+check(queue)
+print(queue.stdout.strip())
+with tempfile.TemporaryDirectory(prefix="blackout-races-") as folder:
+    for index, (capacity, limit, commands) in enumerate([
+        (1, 100000, "venta 1\n" * 100 + "estado\nhistorial\nsalir\n"),
+        (16, 5, "venta 1\n" * 100),
+        (2, 100000, "venta 3\n" * 20),
+    ]):
+        config = Path(folder) / f"store-{index}.conf"
+        text = (ROOT / "config/tienda-d.conf").read_text()
+        text = text.replace("data_dir=data/D", f"data_dir={folder}/store-{index}")
+        text = text.replace("queue_capacity=256", f"queue_capacity={capacity}")
+        text = text.replace("limit_cent=100000", f"limit_cent={limit}")
+        config.write_text(text)
+        result = subprocess.run(PREFIX + [str(ROOT / "build/tsan/blackout"), "--config", str(config)],
+                                input=commands, capture_output=True, text=True, env=ENV, timeout=30)
+        check(result)
+    # Cierre mientras el receptor espera una línea sin terminar y sin recibir EOF.
+    config = Path(folder) / "live.conf"
+    config.write_text((ROOT / "config/tienda-d.conf").read_text()
+                      .replace("data_dir=data/D", f"data_dir={folder}/live")
+                      .replace("limit_cent=100000", "limit_cent=1"))
+    process = subprocess.Popen(PREFIX + [str(ROOT / "build/tsan/blackout"), "--config", str(config)],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, env=ENV)
+    try:
+        process.stdin.write("venta 1\nventa ")
+        process.stdin.flush()
+        process.wait(timeout=10)
+        out, err = process.communicate(timeout=5)
+        check(subprocess.CompletedProcess(process.args, process.returncode, out, err))
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+print("ThreadSanitizer: cola y cuatro escenarios de tienda sin diagnósticos de carreras.")

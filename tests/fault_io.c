@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static int sale_started = 0;
@@ -63,6 +64,10 @@ int fsync(int fd)
             interrupted = 1; errno = EINTR; return -1;
         }
         if (strcmp(mode, "sync_error") == 0 && sale_started) { errno = EIO; return -1; }
+        if (strcmp(mode, "slow_sync") == 0 && sale_started) {
+            struct timespec delay = { .tv_sec = 0, .tv_nsec = 10000000 };
+            while (nanosleep(&delay, &delay) < 0 && errno == EINTR) { }
+        }
     }
     return real_sync(fd);
 }

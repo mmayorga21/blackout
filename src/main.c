@@ -9,6 +9,8 @@ int main(int argc, char **argv)
 {
     /* Configurar antes de la primera operación sobre stdout. */
     if (setvbuf(stdout, NULL, _IOLBF, 0) != 0) return EXIT_FAILURE;
+    /* La validación usa fgets; luego poll/read reciben comandos sin datos prefetched. */
+    if (setvbuf(stdin, NULL, _IONBF, 0) != 0) return EXIT_FAILURE;
     if (argc == 2 && strcmp(argv[1], "--help") == 0) {
         puts("Uso: blackout --config RUTA [--historial]\nTienda independiente con registro CSV durable de ventas.");
         return EXIT_SUCCESS;
