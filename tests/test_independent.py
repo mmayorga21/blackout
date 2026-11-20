@@ -1,10 +1,15 @@
 """Pruebas de comportamiento en procesos separados y directorios temporales."""
 import os
+import csv
+from datetime import datetime
+import io
 from pathlib import Path
 import selectors
 import subprocess
 import tempfile
+import struct
 import unittest
+import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "bin/blackout"
@@ -17,7 +22,7 @@ class IndependentStore(unittest.TestCase):
         self.folder = Path(self.temp.name)
         self.config = self.folder / "store.conf"
         self.data = self.folder / "data/nested/D"
-        self.journal = self.data / "sales.journal"
+        self.journal = self.data / "sales.csv"
         self.configure()
 
     def configure(self, limit=100000, store="D", chain="none"):
@@ -162,7 +167,7 @@ class IndependentStore(unittest.TestCase):
         self.journal.write_bytes(b"BLKOUT1\n")
         result = self.run_store()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Cabecera incompleta", result.stderr)
+        self.assertIn("Cabecera CSV incompleta", result.stderr)
         self.assertEqual(self.journal.read_bytes(), b"BLKOUT1\n")
 
     def test_write_and_sync_failures_never_confirm(self):
@@ -209,6 +214,97 @@ class IndependentStore(unittest.TestCase):
         self.journal.unlink()
         os.link(original, self.journal)
         self.assertNotEqual(self.run_store().returncode, 0)
+
+    def test_csv_fields_timestamp_amount_and_history(self):
+        result = self.run_store("historial\nventa 1250\nhistorial\nventa 1\nhistorial\nsalir\n")
+        self.assert_ok(result)
+        self.assertIn("Sin ventas registradas", result.stdout)
+        self.assertIn("D:1 |", result.stdout)
+        self.assertIn("| 12.50", result.stdout)
+        self.assertIn("D:2 |", result.stdout)
+        self.assertIn("| 0.01", result.stdout)
+        rows = list(csv.DictReader(io.StringIO(self.journal.read_text())))
+        self.assertEqual(list(rows[0]), ["identificador", "fecha_hora", "valor_venta", "crc32"])
+        self.assertEqual([r["identificador"] for r in rows], ["D:1", "D:2"])
+        self.assertEqual([r["valor_venta"] for r in rows], ["12.50", "0.01"])
+        stamp = datetime.strptime(rows[0]["fecha_hora"], "%Y-%m-%dT%H:%M:%S%z")
+        self.assertIsNotNone(stamp.utcoffset())
+        self.assertLess(abs((datetime.now().astimezone() - stamp).total_seconds()), 10)
+        self.assert_ok(self.run_store("venta 50\nhistorial\n"))
+        self.assertIn("Ingresos: 1301", self.run_store().stdout)
+
+    def test_history_option_for_closed_store(self):
+        self.configure(limit=1000)
+        self.assert_ok(self.run_store("venta 1000\n"))
+        original = self.journal.read_bytes()
+        result = subprocess.run([str(BINARY), "--config", str(self.config), "--historial"],
+                                text=True, capture_output=True, timeout=5)
+        self.assert_ok(result)
+        self.assertIn("D:1 |", result.stdout)
+        self.assertIn("| 10.00", result.stdout)
+        self.assertEqual(original, self.journal.read_bytes())
+
+    def create_legacy(self, amounts=(1000, 2500)):
+        self.data.mkdir(parents=True)
+        header = bytearray(64)
+        header[:8] = b"BLKOUT1\n"
+        header[8:9] = b"D"
+        struct.pack_into("<Q", header, 40, 100000)
+        struct.pack_into("<I", header, 60, zlib.crc32(header[:60]))
+        content = header
+        for sequence, amount in enumerate(amounts, 1):
+            record = bytearray(32)
+            record[:4] = b"SALE"
+            struct.pack_into("<QQ", record, 4, sequence, amount)
+            struct.pack_into("<I", record, 28, zlib.crc32(record[:28]))
+            content.extend(record)
+        legacy = self.data / "sales.journal"
+        legacy.write_bytes(content)
+        return legacy
+
+    def test_migration_keeps_original_and_unknown_dates(self):
+        legacy = self.create_legacy()
+        original = legacy.read_bytes()
+        result = self.run_store("historial\nventa 50\nsalir\n")
+        self.assert_ok(result)
+        self.assertIn("convertido a sales.csv", result.stderr)
+        self.assertIn("D:1 | desconocida | 10.00", result.stdout)
+        self.assertIn("D:2 | desconocida | 25.00", result.stdout)
+        self.assertIn("Venta aceptada: D:3", result.stdout)
+        self.assertEqual(original, legacy.read_bytes())
+        restart = self.run_store()
+        self.assert_ok(restart)
+        self.assertIn("Ventas: 3 | Ingresos: 3550", restart.stdout)
+        self.assertNotIn("convertido", restart.stderr)
+
+    def test_corrupted_legacy_does_not_publish_csv(self):
+        legacy = self.create_legacy()
+        content = bytearray(legacy.read_bytes())
+        content[80] ^= 1
+        legacy.write_bytes(content)
+        result = self.run_store()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.journal.exists())
+        self.assertEqual(content, legacy.read_bytes())
+
+    def test_partial_legacy_tail_keeps_backup(self):
+        legacy = self.create_legacy()
+        original = legacy.read_bytes() + b"SALEpartial"
+        legacy.write_bytes(original)
+        result = self.run_store("historial\n")
+        self.assert_ok(result)
+        self.assertIn("registro incompleto final omitido", result.stderr)
+        self.assertIn("Ingresos: 3500", result.stdout)
+        self.assertEqual(original, legacy.read_bytes())
+
+    def test_missing_csv_does_not_restore_stale_backup(self):
+        self.create_legacy()
+        self.assert_ok(self.run_store("venta 50\n"))
+        self.journal.unlink()
+        result = self.run_store()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Falta el CSV", result.stderr)
+        self.assertFalse(self.journal.exists())
 
 
 if __name__ == "__main__":

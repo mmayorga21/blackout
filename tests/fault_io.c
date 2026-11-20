@@ -16,8 +16,8 @@ static int is_journal(int fd)
     ssize_t length = readlink(link, path, sizeof path - 1);
     if (length < 0) return 0;
     path[length] = '\0';
-    size_t n = strlen(path), suffix = strlen("/sales.journal");
-    return n >= suffix && strcmp(path + n - suffix, "/sales.journal") == 0;
+    size_t n = strlen(path), suffix = strlen("/sales.csv");
+    return n >= suffix && strcmp(path + n - suffix, "/sales.csv") == 0;
 }
 
 ssize_t write(int fd, const void *buffer, size_t length)
@@ -28,7 +28,7 @@ ssize_t write(int fd, const void *buffer, size_t length)
     if (real_write == NULL) _exit(98);
     const char *mode = getenv("BLACKOUT_TEST_FAULT");
     if (mode && is_journal(fd)) {
-        if (length == 32 && memcmp(buffer, "SALE", 4) == 0) {
+        if (length > 12 && memchr(buffer, ':', length) != NULL) {
             sale_started = 1;
             if (strcmp(mode, "partial_exit") == 0) {
                 if (real_write(fd, buffer, 12) != 12) _exit(97);

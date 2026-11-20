@@ -5,6 +5,9 @@
 
 typedef struct {
     int fd;
+    int metadata_fd;
+    int legacy_fd;
+    char store_id[33];
     uint64_t count;
     int64_t total_cent;
 } sales_journal;
@@ -12,6 +15,7 @@ typedef struct {
 int journal_open(sales_journal *journal, const store_config *config);
 /* Un error de escritura o sincronización obliga a detener esta instancia. */
 int journal_append(sales_journal *journal, int64_t amount);
+int journal_history(const sales_journal *journal);
 int journal_close(sales_journal *journal);
 
 #endif

@@ -23,7 +23,7 @@ int console_run(local_store *store)
 {
     char line[256];
     int interactive = isatty(STDIN_FILENO);
-    puts("Comandos: venta CENTAVOS | estado | ayuda | salir");
+    puts("Comandos: venta CENTAVOS | estado | historial | ayuda | salir");
     store_status(store);
     while (!store_at_limit(store)) {
         if (interactive) { fputs("blackout> ", stdout); fflush(stdout); }
@@ -45,7 +45,14 @@ int console_run(local_store *store)
         if (!*command) continue;
         if (strcmp(command, "salir") == 0) { puts("Salida ordenada; historial conservado."); return 0; }
         if (strcmp(command, "estado") == 0) { store_status(store); continue; }
-        if (strcmp(command, "ayuda") == 0) { puts("venta CENTAVOS | estado | ayuda | salir"); continue; }
+        if (strcmp(command, "historial") == 0) {
+            if (journal_history(&store->journal) < 0) {
+                fputs("No se pudo leer un historial íntegro; se detiene la instancia.\n", stderr);
+                return -1;
+            }
+            continue;
+        }
+        if (strcmp(command, "ayuda") == 0) { puts("venta CENTAVOS | estado | historial | ayuda | salir"); continue; }
         if (strncmp(command, "venta", 5) == 0 && isspace((unsigned char)command[5])) {
             char *text = command + 5;
             while (isspace((unsigned char)*text)) text++;
