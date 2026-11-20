@@ -1,0 +1,33 @@
+#include "config.h"
+
+#include <inttypes.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "--help") == 0) {
+        puts("Uso: blackout --config RUTA\nValida la configuración inicial de una tienda.");
+        return EXIT_SUCCESS;
+    }
+    if (argc != 3 || strcmp(argv[1], "--config") != 0) {
+        fputs("Uso: blackout --config RUTA (o --help).\n", stderr);
+        return EXIT_FAILURE;
+    }
+    store_config config;
+    while (config_load(argv[2], &config, stderr) != 0) {
+        char reply[32];
+        fputs("Corrige el archivo y pulsa Enter para reintentar; q para salir: ", stderr);
+        if (fgets(reply, sizeof reply, stdin) == NULL || reply[0] == 'q' || reply[0] == 'Q')
+            return EXIT_FAILURE;
+        if (strchr(reply, '\n') == NULL) {
+            int c;
+            while ((c = getchar()) != '\n' && c != EOF) { }
+        }
+    }
+    printf("Configuración válida: tienda %s, cadena %s, dirección %s:%u.\n",
+           config.store_id, config.chain_id, config.bind_address, config.port);
+    printf("Límite: %" PRId64 " centavos; datos: %s.\n", config.limit_cent, config.data_dir);
+    puts("Base de arranque: ventas, persistencia y red pendientes de implementar.");
+    return EXIT_SUCCESS;
+}

@@ -1,0 +1,16 @@
+/docs/
+/build/
+/bin/
+/data/
+/logs/
+*.o
+*.d
+*.log
+*.core
+core
+.env
+.env.*
+*.swp
+*~
+.vscode/
+.idea/
