@@ -7,7 +7,7 @@ OBJECTS := $(patsubst src/%.c,build/%.o,$(SOURCES))
 TARGET := bin/blackout
 CONFIG ?= config/tienda-d.conf
 
-.PHONY: all run clean
+.PHONY: all run test clean
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS) | bin
@@ -21,6 +21,12 @@ build bin:
 
 run: $(TARGET)
 	./$(TARGET) --config "$(CONFIG)"
+
+build/fault_io.so: tests/fault_io.c | build
+	$(CC) -std=c11 -Wall -Wextra -Wpedantic -fPIC -shared $< -ldl -o $@
+
+test: $(TARGET) build/fault_io.so
+	python3 -m unittest discover -s tests -v
 
 clean:
 	$(RM) -r build bin

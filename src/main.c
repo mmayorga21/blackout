@@ -1,4 +1,5 @@
 #include "config.h"
+#include "console.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -6,8 +7,10 @@
 
 int main(int argc, char **argv)
 {
+    /* Configurar antes de la primera operación sobre stdout. */
+    if (setvbuf(stdout, NULL, _IOLBF, 0) != 0) return EXIT_FAILURE;
     if (argc == 2 && strcmp(argv[1], "--help") == 0) {
-        puts("Uso: blackout --config RUTA\nValida la configuración inicial de una tienda.");
+        puts("Uso: blackout --config RUTA\nTienda independiente con registro durable de ventas.");
         return EXIT_SUCCESS;
     }
     if (argc != 3 || strcmp(argv[1], "--config") != 0) {
@@ -28,6 +31,9 @@ int main(int argc, char **argv)
     printf("Configuración válida: tienda %s, cadena %s, dirección %s:%u.\n",
            config.store_id, config.chain_id, config.bind_address, config.port);
     printf("Límite: %" PRId64 " centavos; datos: %s.\n", config.limit_cent, config.data_dir);
-    puts("Base de arranque: ventas, persistencia y red pendientes de implementar.");
-    return EXIT_SUCCESS;
+    local_store store;
+    if (store_open(&store, &config) < 0) return EXIT_FAILURE;
+    int result = console_run(&store);
+    if (store_close(&store) < 0) result = -1;
+    return result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

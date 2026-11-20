@@ -1,0 +1,17 @@
+#ifndef BLACKOUT_JOURNAL_H
+#define BLACKOUT_JOURNAL_H
+
+#include "config.h"
+
+typedef struct {
+    int fd;
+    uint64_t count;
+    int64_t total_cent;
+} sales_journal;
+
+int journal_open(sales_journal *journal, const store_config *config);
+/* Un error de escritura o sincronización obliga a detener esta instancia. */
+int journal_append(sales_journal *journal, int64_t amount);
+int journal_close(sales_journal *journal);
+
+#endif
