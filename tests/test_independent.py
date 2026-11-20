@@ -298,13 +298,42 @@ class IndependentStore(unittest.TestCase):
         self.assertEqual(original, legacy.read_bytes())
 
     def test_missing_csv_does_not_restore_stale_backup(self):
-        self.create_legacy()
+        legacy = self.create_legacy()
+        original = legacy.read_bytes()
         self.assert_ok(self.run_store("venta 50\n"))
         self.journal.unlink()
         result = self.run_store()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Falta el CSV", result.stderr)
-        self.assertFalse(self.journal.exists())
+        self.assert_ok(result)
+        self.assertIn("se creó un historial vacío", result.stderr)
+        self.assertIn("Ventas: 0 | Ingresos: 0", result.stdout)
+        self.assertEqual(original, legacy.read_bytes())
+        with self.journal.open() as file:
+            self.assertEqual(list(csv.DictReader(file)), [])
+        restart = self.run_store("venta 50\n")
+        self.assert_ok(restart)
+        self.assertIn("Venta aceptada: D:1", restart.stdout)
+        self.assertNotIn("convertido", restart.stderr)
+
+    def test_missing_csv_without_backup_starts_empty_and_persists_new_sales(self):
+        self.assert_ok(self.run_store("venta 1000\n"))
+        self.journal.unlink()
+        result = self.run_store("historial\nventa 250\nsalir\n")
+        self.assert_ok(result)
+        self.assertIn("Sin ventas registradas", result.stdout)
+        self.assertIn("Venta aceptada: D:1", result.stdout)
+        restart = self.run_store("venta 50\n")
+        self.assert_ok(restart)
+        self.assertIn("Venta aceptada: D:2", restart.stdout)
+        self.assertIn("Ventas: 2 | Ingresos: 300", restart.stdout)
+
+    def test_deleted_csv_resets_previously_closed_store(self):
+        self.configure(limit=100)
+        self.assert_ok(self.run_store("venta 100\n"))
+        self.journal.unlink()
+        result = self.run_store("venta 25\n")
+        self.assert_ok(result)
+        self.assertIn("Estado: ABIERTA", result.stdout)
+        self.assertIn("Ventas: 1 | Ingresos: 25", result.stdout)
 
 
 if __name__ == "__main__":

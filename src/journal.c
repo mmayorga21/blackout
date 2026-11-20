@@ -367,14 +367,13 @@ int journal_open(sales_journal *journal, const store_config *config)
         errno = EINVAL; goto failure;
     }
     if (journal->fd < 0) {
-        if (metadata_bytes != 0) {
-            fputs("Falta el CSV de una tienda ya inicializada; no se crea un historial vacío.\n", stderr);
-            errno = EINVAL; goto failure;
-        }
+        /* Un CSV borrado en una tienda inicializada representa un reinicio solicitado.
+           El respaldo antiguo solo se importa durante la primera inicialización. */
+        int migrate = metadata_bytes == 0 && journal->legacy_fd >= 0;
         temporary = openat(directory, ".sales.csv.pending", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (temporary < 0 || lock_regular(temporary) < 0 || ftruncate(temporary, 0) < 0 ||
             write_all(temporary, (const unsigned char *)csv_header, strlen(csv_header)) < 0) goto failure;
-        if (journal->legacy_fd >= 0 && migrate_legacy(journal->legacy_fd, temporary, config) < 0) goto failure;
+        if (migrate && migrate_legacy(journal->legacy_fd, temporary, config) < 0) goto failure;
         if (sync_fd(temporary) < 0) goto failure;
         if (metadata_bytes == 0 && (write_all(journal->metadata_fd, (unsigned char *)metadata, metadata_length) < 0 ||
                                    sync_fd(journal->metadata_fd) < 0)) goto failure;
@@ -382,8 +381,10 @@ int journal_open(sales_journal *journal, const store_config *config)
             goto failure;
         journal->fd = temporary;
         temporary = -1;
-        if (journal->legacy_fd >= 0)
+        if (migrate)
             fputs("Historial convertido a sales.csv; sales.journal se conserva como respaldo sin fechas originales.\n", stderr);
+        else if (metadata_bytes != 0)
+            fputs("No existe sales.csv: se creó un historial vacío.\n", stderr);
     }
     if (lock_regular(journal->fd) < 0 || sync_fd(journal->metadata_fd) < 0 || sync_fd(directory) < 0 ||
         load_csv(journal, config->limit_cent) < 0) goto failure;
