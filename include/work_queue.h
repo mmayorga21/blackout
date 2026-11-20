@@ -4,9 +4,15 @@
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "sale.h"
 
-typedef enum { REQUEST_SALE, REQUEST_STATUS, REQUEST_HISTORY, REQUEST_HELP } request_kind;
-typedef struct { request_kind kind; int64_t amount; } work_request;
+typedef enum { REQUEST_SALE, REQUEST_STATUS, REQUEST_HISTORY, REQUEST_HELP, REQUEST_REMOTE } request_kind;
+typedef struct {
+    request_kind kind;
+    int64_t amount;
+    char sale_csv[SALE_CSV_SIZE];
+    uint64_t connection;
+} work_request;
 typedef enum { QUEUE_RUNNING, QUEUE_STOPPED, QUEUE_ERROR } queue_stop_reason;
 
 typedef struct {
@@ -21,6 +27,8 @@ typedef struct {
 int queue_init(work_queue *queue, size_t capacity);
 /* 0: encolado; 1: recepción cerrada o detenida. Espera espacio sin espera activa. */
 int queue_put(work_queue *queue, work_request request);
+/* 0 encolado; 1 cerrada; 2 llena: la red conserva la solicitud y sigue atendiendo envíos. */
+int queue_try_put(work_queue *queue, work_request request);
 /* 0: entrega solicitud y estado; 1: no quedan solicitudes y la recepción terminó. */
 int queue_take(work_queue *queue, work_request *request, queue_stop_reason *reason);
 void queue_finish(work_queue *queue);

@@ -1,4 +1,5 @@
 #include "journal.h"
+#include "chain_journal.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -335,6 +336,7 @@ static int load_csv(sales_journal *journal, int64_t limit)
 
 int journal_open(sales_journal *journal, const store_config *config)
 {
+    if (strcmp(config->chain_id, "none")) return chain_open(journal, config);
     *journal = (sales_journal){ .fd = -1, .metadata_fd = -1, .legacy_fd = -1 };
     strcpy(journal->store_id, config->store_id);
     if (make_directories(config->data_dir) < 0) { perror("Directorio de datos"); return -1; }
@@ -404,6 +406,7 @@ failure:
 
 int journal_append(sales_journal *journal, int64_t amount)
 {
+    if (journal->chain) return chain_local(journal, amount);
     if (amount <= 0 || amount > INT64_MAX - journal->total_cent || journal->count == UINT64_MAX) {
         errno = EOVERFLOW; return -1;
     }
@@ -424,6 +427,7 @@ int journal_append(sales_journal *journal, int64_t amount)
 
 int journal_history(const sales_journal *journal)
 {
+    if (journal->chain) return chain_history(journal);
     csv_reader reader = { .fd = journal->fd };
     char line[256], stamp[32];
     size_t length;
@@ -447,6 +451,7 @@ int journal_history(const sales_journal *journal)
 
 int journal_close(sales_journal *journal)
 {
+    if (journal->chain) return chain_close(journal);
     int failed = 0;
     if (close(journal->fd) < 0) failed = 1;
     if (journal->legacy_fd >= 0 && close(journal->legacy_fd) < 0) failed = 1;

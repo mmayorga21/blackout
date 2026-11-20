@@ -198,7 +198,7 @@ class IndependentStore(unittest.TestCase):
         self.configure(chain="X")
         result = self.run_store()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("solo admite tiendas independientes", result.stderr)
+        self.assertIn("Configuración incoherente", result.stderr)
         self.assertFalse(self.journal.exists())
 
     def test_invalid_storage_location(self):

@@ -75,6 +75,22 @@ int queue_take(work_queue *queue, work_request *request, queue_stop_reason *reas
     return 0;
 }
 
+int queue_try_put(work_queue *queue, work_request request)
+{
+    checked(pthread_mutex_lock(&queue->mutex));
+    int result = 0;
+    if (queue->input_closed || queue->stop != QUEUE_RUNNING) result = 1;
+    else if (queue->count == queue->capacity) result = 2;
+    else {
+        size_t tail = (queue->head + queue->count) % queue->capacity;
+        queue->items[tail] = request;
+        queue->count++;
+        checked(pthread_cond_signal(&queue->not_empty));
+    }
+    checked(pthread_mutex_unlock(&queue->mutex));
+    return result;
+}
+
 void queue_finish(work_queue *queue)
 {
     checked(pthread_mutex_lock(&queue->mutex));

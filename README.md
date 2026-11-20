@@ -2,7 +2,7 @@
 
 Proyecto de Sistemas Operativos: tiendas que registran y comparten ventas sin servidor central y recuperan información después de apagones.
 
-Estado: etapa 5, tienda independiente con recepción y procesamiento concurrentes, historial CSV con fecha y hora, recuperación y modo de solo consulta al alcanzar el límite. La comunicación entre tiendas, la lectura del catálogo de pares y las consultas remotas del gobierno todavía no están implementados.
+Estado: etapa 6, tiendas independientes y cadenas de exactamente dos tiendas con comunicación TCP, ventas compartidas, reconexión y deduplicación. Se conserva el historial CSV y el modo de solo consulta al alcanzar el límite. El orden entre múltiples tiendas y las consultas remotas del gobierno todavía no están implementados.
 
 ## Compilación
 
@@ -29,7 +29,7 @@ make run
 make run CONFIG=config/tienda-d.conf
 ```
 
-Se incluyen A, B y C de la cadena X para las etapas posteriores, y D independiente para esta etapa. Cada ejemplo usa un puerto y directorio de datos propios. Actualmente se rechazan configuraciones de cadena para evitar operarlas como independientes por error. El programa no abre sockets; D sí crea su directorio e historial de ventas.
+`config/tienda-d.conf` inicia D independiente. `config/demo-dos/` contiene una demostración ejecutable de A y B de la cadena X, con puertos y datos separados. Los ejemplos originales A/B/C y su catálogo de tres tiendas quedan para la etapa 7: actualmente se rechaza un catálogo con más de dos integrantes.
 
 Formato: una `clave=valor` por línea, espacios exteriores opcionales, comentarios en líneas que comienzan con `#`. No se admiten claves repetidas, desconocidas o faltantes. Las rutas no usan comillas y se interpretarán respecto al directorio de ejecución.
 
@@ -43,9 +43,44 @@ Formato: una `clave=valor` por línea, espacios exteriores opcionales, comentari
 | timeout_ms | Entero de 1 a 3600000 milisegundos. |
 | queue_capacity | Entero de 1 a 1000000 elementos. |
 | data_dir | Ruta no vacía de hasta 255 bytes; cada tienda necesita una propia. |
-| peers_file | Ruta de hasta 255 bytes al catálogo previsto; `none` para D. Su contenido aún no se valida. |
+| peers_file | Catálogo de exactamente dos tiendas para una cadena; `none` para D. |
 
-`queue_capacity` determina la capacidad de la cola local; su memoria se reserva al abrir la consola. Los demás límites máximos son restricciones de formato. La etapa de red validará el catálogo, la coherencia de cadena y la disponibilidad de puertos. La tienda independiente requiere `chain_id=none` y `peers_file=none`.
+`queue_capacity` determina la capacidad de la cola local; su memoria se reserva al abrir la consola. Los demás límites máximos son restricciones de formato. La tienda independiente requiere `chain_id=none` y `peers_file=none`. En una cadena se validan el catálogo, las identidades, IPv4 y puertos; un fallo de bind impide iniciar el servicio de red. La identidad propia y su puerto deben coincidir con el catálogo; `0.0.0.0` permite escuchar en todas las interfaces.
+
+## Demostración con dos tiendas
+
+Desde la raíz del repositorio, abre dos terminales. En la primera:
+
+```sh
+make
+./bin/blackout --config config/demo-dos/tienda-a.conf
+```
+
+En la segunda:
+
+```sh
+./bin/blackout --config config/demo-dos/tienda-b.conf
+```
+
+Ingresa `venta 1000` en A y `venta 2500` en B. Después del intercambio, `estado` muestra ingresos propios de 1000 y 2500 respectivamente e ingresos conocidos de cadena de 3500 centavos en ambas. `historial` permite ver los dos eventos y sus fechas originales. Los CSV quedan en `data/demo-dos/A/` y `data/demo-dos/B/`; D conserva sus datos separados en `data/D/`.
+
+El catálogo usa una línea `ID IPv4 PUERTO` por tienda, incluida la propia. Requiere dos identidades y extremos distintos. Para computadoras diferentes, modifica direcciones y rutas de los ejemplos y usa el mismo catálogo en ambas. Las dos pueden empezar en cualquier orden y registrar compras sin que la otra esté conectada, sujetas al límite conocido localmente.
+
+## Ventas compartidas y red
+
+Cada cadena usa tres hilos: recepción de consola, trabajador contable y red. El trabajador registra compras y ventas remotas en la misma cola. Solo él modifica el historial y sus índices. La red conserva una copia protegida de los eventos ya registrados y utiliza sockets no bloqueantes, `poll` y una tubería de notificación. Si la cola está llena conserva una solicitud remota y pausa la lectura; continúa atendiendo envíos y notificaciones, sin esperar espacio bloqueando el hilo de red.
+
+Ambas tiendas escuchan y la de identidad lexicográficamente menor inicia la conexión. Esta regla evita conexiones duplicadas. La identificación inicial comprueba versión, cadena, identidad del par y límite. El protocolo está pensado para los pares de confianza configurados en el laboratorio; la identificación no es autenticación criptográfica.
+
+Los mensajes tienen cabecera de 12 bytes: magic BLK6, versión 1, tipo, dos bytes reservados y longitud de cuerpo en orden de red. El cuerpo debe ser menor de 256 bytes. HELLO intercambia identidad/cadena/límite, SALE contiene una fila CSV de venta, ACK confirma un ID guardado, PING/PONG comprueban comunicación y REJECT informa rechazo. Se manejan mensajes fragmentados o agrupados y envíos parciales. Los plazos de conexión, confirmación y reconexión proceden de `timeout_ms`; el latido usa la mitad de ese plazo. El formato exacto puede evolucionar al incorporar el recorrido de la etapa 7.
+
+El origen guarda y sincroniza antes de compartir. El receptor confirma únicamente después de guardar y sincronizar, o después de reconocer un duplicado ya registrado. El mismo ID con otro importe o fecha se rechaza. Una venta nueva aumenta ingresos conocidos de cadena; solo si su origen coincide con la tienda incrementa ingresos propios. La secuencia propia no depende del número de ventas ajenas.
+
+Al reconectar se reenvía el historial completo de eventos registrados. Un índice por ID evita duplicaciones; el receptor conserva las fechas e importes del origen. Las confirmaciones y el avance de esta conexión se mantienen en memoria: al reiniciar se reconstruye la entrega reenviando desde el CSV durable. `estado` muestra conexión y entregas todavía sin confirmar en esa conexión. Que se hayan recibido los mismos eventos no garantiza que ambas tiendas observen simultáneamente todas las confirmaciones.
+
+La primera versión intercambia historiales completos en cada reconexión; la optimización por inventarios y la validación exhaustiva de apagones quedan para la etapa 8. El funcionamiento eventual presupone comunicación recuperada, capacidad de almacenamiento y participantes que regresan. No hay coordinación global de compras: durante una desconexión una tienda puede desconocer ventas que después harán superar el límite.
+
+Al alcanzar el límite, las compras propias se rechazan y la consola permanece en SOLO_CONSULTA. La red continúa guardando y compartiendo ventas ya aceptadas por los participantes. `salir` detiene la red y deja procesar las solicitudes ya encoladas; los eventos sin confirmación permanecen en disco para el siguiente arranque. Esta etapa no implementa todavía el certificado de cierre distribuido.
 
 Si la configuración es inválida, se muestra el error y se permite editar el archivo y pulsar Enter para volver a cargarlo. `q` cancela; con entrada estándar cerrada finaliza con estado de error. Los argumentos de línea de órdenes inválidos muestran el uso y devuelven error.
 
@@ -77,7 +112,7 @@ La consulta abre y valida el almacenamiento y puede ejecutar la recuperación o 
 
 ## Concurrencia local
 
-La consola usa dos hilos: el principal recibe y valida comandos; un trabajador procesa ventas, estado, historial y ayuda en orden FIFO. Solo el trabajador modifica las ventas, los ingresos y la secuencia durante la operación. La recuperación inicial y la consulta exclusiva con `--historial` se ejecutan antes o sin crear el trabajador.
+La tienda independiente usa dos hilos: el principal recibe y valida comandos; un trabajador procesa ventas, estado, historial y ayuda en orden FIFO. En las cadenas el hilo de red produce además solicitudes remotas para esa cola. Solo el trabajador modifica las ventas, los ingresos y la secuencia durante la operación. La recuperación inicial y la consulta exclusiva con `--historial` se ejecutan antes o sin crear el trabajador y no abren servicios de red.
 
 Una cola circular de capacidad configurable usa un mutex y dos variables de condición: el consumidor espera cuando está vacía y el productor cuando está llena. Las esperas comprueban su condición en un bucle. Las escrituras, `fsync` y la impresión del historial se ejecutan fuera del mutex de la cola. La recepción puede continuar mientras el trabajador guarda una venta, hasta llenar la cola. Una consulta extensa puede demorar solicitudes posteriores; la ejecución contable sigue siendo secuencial.
 
@@ -95,11 +130,11 @@ El historial principal es `data_dir/sales.csv`, un archivo de texto CSV con esta
 identificador,fecha_hora,valor_venta,crc32
 ```
 
-`identificador` tiene formato `D:1`; `fecha_hora` usa, por ejemplo, `2026-11-20T12:30:00-0500`; `valor_venta` usa un punto decimal y dos cifras decimales (1250 centavos se guardan como `12.50`). En memoria se sigue calculando con centavos enteros. La hora procede del reloj y la zona del sistema al registrar la venta; en esta computadora es America/Guayaquil. Puede elegirse otra zona mediante la variable de entorno `TZ`. El orden de ventas depende de la secuencia, no de que el reloj avance de manera continua.
+`identificador` tiene formato `D:1` para la tienda independiente. En cadenas usa `ORIGEN:PERIODO:SECUENCIA`, con un período aleatorio de 128 bits escrito como 32 caracteres hexadecimales. `fecha_hora` usa, por ejemplo, `2026-11-20T12:30:00-0500`; `valor_venta` usa un punto decimal y dos cifras decimales (1250 centavos se guardan como `12.50`). En memoria se sigue calculando con centavos enteros. La hora procede del reloj y la zona del sistema al registrar en origen; en esta computadora es America/Guayaquil. Puede elegirse otra zona mediante la variable de entorno `TZ`. El orden no depende de que el reloj avance de manera continua.
 
 El campo `crc32` detecta daños sobre el texto de los otros tres campos; no autentica ventas. El CSV puede inspeccionarse con un editor o importarse en una hoja de cálculo, pero no debe editarse sobre el archivo de operación. Sus registros tienen un formato estricto; cambiar separadores, finales de línea o importes requiere recalcular la verificación y no es una operación soportada.
 
-`store.meta` conserva en texto la versión, identidad y límite con CRC32 y sirve de archivo de bloqueo. Cambiar identidad o límite sobre el mismo directorio provoca rechazo, evitando mezclar tiendas o reabrir una tienda elevando su límite. No debe borrarse. Los nuevos períodos comerciales todavía no están implementados.
+`store.meta` conserva en texto la versión, identidad y límite con CRC32 y sirve de archivo de bloqueo. En cadenas también vincula el directorio a su cadena. Cambiar esos datos sobre el mismo directorio provoca rechazo. Cada cadena tiene además `period.id`, que conserva el período local y su CRC32. Un reinicio normal mantiene ese período y continúa la secuencia; un CSV nuevo crea un período distinto, evitando reutilizar IDs. No borres ni edites los metadatos de un historial existente.
 
 Las ventas se añaden al final mediante `write`, manejando escrituras parciales e interrupciones. Solo se confirman después de `fsync`. Al crear directorios y archivos también se sincronizan los directorios correspondientes. Esta decisión sigue las condiciones de durabilidad descritas en el [manual de fsync](https://man7.org/linux/man-pages/man2/fsync.2.html).
 
@@ -107,7 +142,9 @@ Al iniciar se reconstruyen ingresos y secuencia desde el CSV válido. Una últim
 
 Si existe el antiguo `sales.journal` y todavía no hay metadatos de inicialización, se valida y convierte mediante un archivo temporal sincronizado y renombrado. El binario original se conserva íntegro como respaldo y no recibe ventas nuevas. Sus fechas se marcan `desconocida`, porque no se almacenaban. La migración no se repite en los siguientes arranques. Después de migrar no debe usarse una versión anterior del programa sobre ese directorio: el CSV es la fuente vigente.
 
-Para empezar un historial nuevo, termina la tienda y elimina únicamente `sales.csv`. En el siguiente arranque se crea un CSV vacío con su cabecera: ingresos y cantidad de ventas comienzan en cero, y la secuencia vuelve a 1. Esto también permite empezar de nuevo si la tienda había alcanzado el límite. Se conserva `store.meta`, por lo que siguen aplicándose la misma identidad y el mismo límite. Un respaldo binario antiguo no se restaura al detectar este reinicio. Un CSV existente pero corrupto continúa provocando error; no se reemplaza silenciosamente por uno vacío.
+Para empezar un historial independiente nuevo, termina la tienda y elimina únicamente `sales.csv`. En el siguiente arranque se crea un CSV vacío con su cabecera: ingresos y cantidad de ventas comienzan en cero, y la secuencia vuelve a 1. Esto también permite empezar de nuevo si la tienda había alcanzado el límite. Se conserva `store.meta`, por lo que siguen aplicándose la misma identidad y el mismo límite. Un respaldo binario antiguo no se restaura al detectar este reinicio. Un CSV existente pero corrupto continúa provocando error; no se reemplaza silenciosamente por uno vacío.
+
+En una cadena, eliminar su CSV genera un período local nuevo, pero una tienda conectada puede devolver ventas antiguas que conserva como respaldo compartido. No equivale a borrar globalmente las ventas de la cadena: el reinicio coordinado de un período comercial queda fuera de esta etapa. No se convierte automáticamente un historial independiente en uno de cadena.
 
 Una falla de escritura o sincronización detiene la instancia sin confirmar la venta. El resultado de esa última compra puede ser incierto: al reiniciar podría aparecer un registro completo válido aunque no se hubiera mostrado la confirmación. La consola no tiene claves de reintento del cliente; volver a ingresar el mismo importe crea una compra nueva. Hay que comprobar primero el historial recuperado. Una cabecera interrumpida durante la creación inicial también impide abrir y exige diagnóstico; no se reinicializa automáticamente.
 
@@ -124,9 +161,9 @@ make race-check
 
 La batería usa procesos y directorios temporales, sin tocar `data/D`. Comprueba reinicios, secuencias, límites, desbordamiento, entradas inválidas, bloqueo entre instancias, interrupciones de escritura y detección de corrupción. Incluye lectura del CSV, fechas con zona, consulta tras cierre y migración sin duplicados ni alteración del respaldo. Un interpositor exclusivo de pruebas (`tests/fault_io.c`, compilado como `build/fault_io.so`) simula escrituras parciales, interrupciones, falta de espacio, fallos de sincronización y caídas antes de confirmar. Se carga únicamente mediante el entorno de los procesos de prueba, no se enlaza con el ejecutable normal.
 
-Las pruebas de concurrencia incluyen capacidad uno, disco lento, consultas ordenadas, cierre con entrada abierta, ventas pendientes y espera en reposo. Una prueba en C utiliza cuatro productores y verifica 16000 solicitudes en dos tamaños de cola, sin pérdidas y con orden por productor. Las pruebas tienen tiempos máximos para detectar bloqueos.
+Las pruebas de concurrencia incluyen capacidad uno, disco lento, consultas ordenadas, cierre manual, ventas pendientes y espera en reposo. Una prueba en C utiliza cuatro productores y verifica 16000 solicitudes en dos tamaños de cola, sin pérdidas y con orden por productor. Las pruebas de red levantan dos procesos en puertos temporales y pares TCP controlados para verificar ventas simultáneas, fechas originales, reconexión, reinicio, cambios de período, límites, duplicados, conflictos, mensajes fragmentados/agrupados y fallos de almacenamiento remoto sin ACK falso. Las pruebas tienen tiempos máximos para detectar bloqueos.
 
-`make race-check` compila ejecutables separados bajo `build/tsan/` con ThreadSanitizer. Requiere que GCC disponga de ese runtime. Comprueba la cola y cuatro escenarios de la tienda; no reemplaza las pruebas funcionales ni demuestra ausencia de carreras en todas las ejecuciones posibles. En este entorno el runtime necesita `setarch -R` para evitar un mapeo de memoria incompatible: el script lo aplica solo a los procesos de prueba, sin cambiar la configuración del sistema. Si el entorno no permite esa opción, la comprobación informa el fallo y no lo considera un resultado limpio.
+`make race-check` compila ejecutables separados bajo `build/tsan/` con ThreadSanitizer. Requiere que GCC disponga de ese runtime. Comprueba la cola, cuatro escenarios locales y tres escenarios entre dos tiendas; no reemplaza las pruebas funcionales ni demuestra ausencia de carreras en todas las ejecuciones posibles. En este entorno el runtime necesita `setarch -R` para evitar un mapeo de memoria incompatible: el script lo aplica solo a los procesos de prueba, sin cambiar la configuración del sistema. Si el entorno no permite esa opción, la comprobación informa el fallo y no lo considera un resultado limpio.
 
 ## Estructura
 
@@ -141,4 +178,4 @@ La guía de seguimiento de las etapas se conserva localmente en `docs/`, excluid
 
 ## Autoría
 
-La preparación del proyecto recibió asistencia de Codex, incluido el código de arranque, configuración, tienda independiente y pruebas. La rúbrica del curso exige código no generado por IA: este trabajo no debe presentarse como código escrito íntegramente por el estudiante y tendrá que adecuarse a esa condición para la entrega.
+La preparación del proyecto recibió asistencia de Codex, incluidos configuración, persistencia, concurrencia, comunicación de red y pruebas. La rúbrica del curso exige código no generado por IA: este trabajo no debe presentarse como código escrito íntegramente por el estudiante y tendrá que adecuarse a esa condición para la entrega.

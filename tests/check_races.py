@@ -69,3 +69,12 @@ with tempfile.TemporaryDirectory(prefix="blackout-races-") as folder:
             process.kill()
             process.communicate(timeout=5)
 print("ThreadSanitizer: cola y cuatro escenarios de tienda sin diagnósticos de carreras.")
+
+for pattern in ("simultaneous", "offline_sales", "remote_limit"):
+    result = subprocess.run(["python3", "-m", "unittest", "discover", "-s", str(ROOT / "tests"),
+                             "-p", "test_network.py", "-k", pattern, "-v"],
+                            env={**ENV, "BLACKOUT_NETWORK_TEST_BINARY": str(ROOT / "build/tsan/blackout"),
+                                 "BLACKOUT_NETWORK_TEST_TSAN": "1"},
+                            capture_output=True, text=True, timeout=45)
+    check(result)
+print("ThreadSanitizer: ventas simultáneas, reconexión y límite entre dos tiendas sin diagnósticos de carreras.")

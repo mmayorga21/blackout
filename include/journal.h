@@ -4,12 +4,15 @@
 #include "config.h"
 
 typedef struct {
+    struct chain_data *chain;
     int fd;
     int metadata_fd;
     int legacy_fd;
     char store_id[33];
     uint64_t count;
     int64_t total_cent;
+    int64_t own_total_cent;
+    uint64_t own_sequence;
 } sales_journal;
 
 int journal_open(sales_journal *journal, const store_config *config);

@@ -1,5 +1,7 @@
 #include "console.h"
 #include "work_queue.h"
+#include "chain_journal.h"
+#include "network.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -27,6 +29,7 @@ typedef struct {
     work_queue queue;
     int wake[2];
     int worker_result;
+    network_runtime *network;
 } console_runtime;
 
 static void wake_receiver(console_runtime *runtime)
@@ -52,6 +55,7 @@ static void *process_requests(void *argument)
     work_request request;
     queue_stop_reason reason;
     while (queue_take(&runtime->queue, &request, &reason) == 0) {
+        network_notify(runtime->network);
         if (reason == QUEUE_ERROR) {
             if (request.kind == REQUEST_SALE)
                 fputs("Venta rechazada: solicitud pendiente no aceptada por fallo de la instancia.\n", stderr);
@@ -64,6 +68,14 @@ static void *process_requests(void *argument)
                 runtime->worker_result = -1;
                 stop_worker(runtime, QUEUE_ERROR);
             } else if (result == 0) {
+                if (runtime->network) {
+                    sale_record sale;
+                    if (chain_record(&runtime->store->journal, (size_t)runtime->store->journal.count - 1, &sale) < 0 ||
+                        network_publish(runtime->network, &sale) < 0) {
+                        perror("Preparar entrega de venta durable");
+                        runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
+                    }
+                }
                 store_status(runtime->store);
                 if (store_at_limit(runtime->store))
                     puts("Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
@@ -72,6 +84,7 @@ static void *process_requests(void *argument)
         }
         case REQUEST_STATUS:
             store_status(runtime->store);
+            network_status(runtime->network);
             break;
         case REQUEST_HISTORY:
             if (journal_history(&runtime->store->journal) < 0) {
@@ -83,6 +96,28 @@ static void *process_requests(void *argument)
         case REQUEST_HELP:
             puts("venta CENTAVOS | estado | historial | ayuda | salir");
             break;
+        case REQUEST_REMOTE: {
+            sale_record sale;
+            if (!runtime->network || sale_decode(request.sale_csv, &sale) < 0) {
+                runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR); break;
+            }
+            int was_at_limit = store_at_limit(runtime->store);
+            int result = chain_receive(&runtime->store->journal, &sale);
+            if (result < 0 || (result == 0 && network_publish(runtime->network, &sale) < 0)) {
+                perror("Guardar venta remota");
+                runtime->store->storage_failed = 1;
+                runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
+                break;
+            }
+            if (result == 0) {
+                printf("Venta remota registrada: %s\n", sale.id);
+                store_status(runtime->store);
+                if (!was_at_limit && store_at_limit(runtime->store))
+                    puts("Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
+            } else if (result == 2) fputs("Venta remota rechazada: ID en conflicto, origen o importe inválidos.\n", stderr);
+            network_reply(runtime->network, request.connection, sale.id, result != 2);
+            break;
+        }
         }
     }
     reason = queue_reason(&runtime->queue);
@@ -190,13 +225,21 @@ int console_run(local_store *store)
         close(runtime.wake[0]); close(runtime.wake[1]); queue_destroy(&runtime.queue); return -1;
     }
     pthread_t worker;
+    if (store->journal.chain) {
+        runtime.network = network_start(&store->config, &store->journal, &runtime.queue, runtime.wake[1]);
+        if (!runtime.network) {
+            close(runtime.wake[0]); close(runtime.wake[1]); queue_destroy(&runtime.queue); return -1;
+        }
+    }
     int result = pthread_create(&worker, NULL, process_requests, &runtime);
     if (result != 0) {
         fprintf(stderr, "Crear hilo de procesamiento: %s\n", strerror(result));
+        network_destroy(runtime.network);
         close(runtime.wake[0]); close(runtime.wake[1]); queue_destroy(&runtime.queue); return -1;
     }
     int reception = receive_commands(&runtime);
     if (reception < 0) queue_stop(&runtime.queue, QUEUE_ERROR);
+    network_quiesce(runtime.network);
     queue_finish(&runtime.queue);
     result = pthread_join(worker, NULL);
     if (result != 0) {
@@ -210,6 +253,7 @@ int console_run(local_store *store)
         puts(reception == 1 ? "Salida ordenada; historial conservado." : "Fin de entrada: salida ordenada.");
     if (close(runtime.wake[0]) < 0) { perror("Cerrar notificación"); failed = 1; }
     if (close(runtime.wake[1]) < 0) { perror("Cerrar notificación"); failed = 1; }
+    network_destroy(runtime.network);
     queue_destroy(&runtime.queue);
     return failed ? -1 : 0;
 }
