@@ -104,13 +104,14 @@ class TwoStores(unittest.TestCase):
         for name in "AB":
             self.configure(name)
 
-    def configure(self, name, chain="X", limit=100000, capacity=1):
+    def configure(self, name, chain="X", limit=100000, capacity=1, delay=0, timeout=500):
         text = (ROOT / "config/demo-dos/tienda-a.conf").read_text()
         text = text.replace("store_id=A", f"store_id={name}")
         text = text.replace("chain_id=X", f"chain_id={chain}")
         text = text.replace("port=5101", f"port={self.ports[name]}")
         text = text.replace("limit_cent=100000", f"limit_cent={limit}")
-        text = text.replace("timeout_ms=2000", "timeout_ms=500")
+        text = text.replace("timeout_ms=2000", f"timeout_ms={timeout}")
+        text = text.replace("network_delay_ms=10000", f"network_delay_ms={delay}")
         text = text.replace("queue_capacity=256", f"queue_capacity={capacity}")
         text = text.replace("data_dir=data/demo-dos/A", f"data_dir={self.folder}/{name}")
         text = text.replace("peers_file=config/demo-dos/cadena-x.peers", f"peers_file={self.peers}")
@@ -386,6 +387,78 @@ class TwoStores(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b"exactamente dos", result.stderr)
         self.assertFalse((self.folder / "A/sales.csv").exists())
+
+    def test_ten_second_default_delay_preserves_local_responsiveness(self):
+        for name in "AB":
+            path = self.configure(name, capacity=32, timeout=250)
+            # Omitir la opción comprueba también el valor predeterminado de 10 segundos.
+            path.write_text(path.read_text().replace("network_delay_ms=0\n", ""))
+        a, b = self.start("A"), self.start("B")
+        self.until(lambda: all("Conexión de cadena establecida".encode() in s.errors for s in (a, b)), timeout=20)
+        started = time.monotonic()
+        a.send("venta 1250\n")
+        self.until(lambda: b"Venta aceptada:" in a.output, timeout=5)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(self.rows("B"), [])
+        self.assertIn("Atraso de recepción: 10000 ms".encode(), self.query(a))
+        self.assertEqual(self.rows("B"), [])
+        self.until(lambda: self.synchronized(1), timeout=20)
+        self.assertGreaterEqual(time.monotonic() - started, 9.9)
+        for store in (a, b):
+            self.assertNotIn("Se perdió la conexión".encode(), store.errors)
+            self.assertIsNone(store.process.poll())
+
+    def test_short_delay_ack_round_trip_does_not_cause_false_disconnects(self):
+        for name in "AB":
+            # 200 ms sigue siendo menor que el RTT simulado de 300 ms, pero deja
+            # margen para fsync y la instrumentación de ThreadSanitizer.
+            self.configure(name, capacity=32, delay=150, timeout=200)
+        a, b = self.start("A"), self.start("B")
+        self.until(lambda: all("Conexión de cadena establecida".encode() in s.errors for s in (a, b)))
+        a.send("venta 100\n")
+        b.send("venta 200\n")
+        self.until(lambda: self.synchronized(2))
+        for store in (a, b):
+            deadline = time.monotonic() + 5
+            while "Entregas sin confirmar en esta conexión: 0".encode() not in self.query(store).split(b"Par:")[-1]:
+                self.assertLess(time.monotonic(), deadline)
+            self.assertNotIn("Se perdió la conexión".encode(), store.errors)
+
+    def test_graceful_disconnect_notifies_remaining_store_once(self):
+        a, b = self.start("A"), self.start("B")
+        self.until(lambda: all("Conexión de cadena establecida".encode() in s.errors for s in (a, b)))
+        self.assertEqual(a.stop(), 0)
+        self.until(lambda: "Se perdió la conexión con la tienda A en la cadena X".encode() in b.errors)
+        self.assertNotIn("Se perdió la conexión".encode(), a.errors)
+        self.query(b)
+        self.assertEqual(b.errors.count("Se perdió la conexión".encode()), 1)
+        b.send("venta 100\n")
+        self.until(lambda: len(self.rows("B")) == 1)
+        self.assertIsNone(b.process.poll())
+
+    def test_abrupt_disconnect_notifies_once_then_reconnects(self):
+        a, b = self.start("A"), self.start("B")
+        self.until(lambda: all("Conexión de cadena establecida".encode() in s.errors for s in (a, b)))
+        b.stop(kill=True)
+        self.until(lambda: "Se perdió la conexión con la tienda B en la cadena X".encode() in a.errors)
+        # Dejar ocurrir intentos de reconexión fallidos; no son nuevas desconexiones.
+        deadline = time.monotonic() + 1.1
+        self.until(lambda: time.monotonic() >= deadline)
+        self.assertEqual(a.errors.count("Se perdió la conexión".encode()), 1)
+        b = self.start("B")
+        self.until(lambda: a.errors.count("Conexión de cadena establecida".encode()) == 2)
+        self.assertEqual(b.stop(), 0)
+        self.until(lambda: a.errors.count("Se perdió la conexión".encode()) == 2)
+
+    def test_delay_configuration_rejects_invalid_values(self):
+        for value in ("-1", "60001", "1.5", "no"):
+            with self.subTest(value=value):
+                path = self.configure("A")
+                path.write_text(path.read_text().replace("network_delay_ms=0", f"network_delay_ms={value}"))
+                result = subprocess.run(PREFIX + [str(BINARY), "--config", str(path)],
+                                        input=b"q\n", capture_output=True, timeout=5)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("valor inválido para network_delay_ms".encode(), result.stderr)
 
 
 if __name__ == "__main__":

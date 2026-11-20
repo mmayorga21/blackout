@@ -11,6 +11,7 @@ typedef struct {
     unsigned int port;
     int64_t limit_cent;
     unsigned int timeout_ms;
+    unsigned int network_delay_ms;
     unsigned int queue_capacity;
     char data_dir[256];
     char peers_file[256];

@@ -15,6 +15,11 @@
 #include <unistd.h>
 
 enum { WIRE_HEADER = 12, WIRE_MAX = 256, HELLO = 1, SALE = 2, ACK = 3, PING = 4, PONG = 5, REJECT = 6 };
+typedef struct {
+    int64_t due;
+    unsigned char type;
+    char body[WIRE_MAX];
+} delayed_frame;
 struct network_runtime {
     store_config config;
     peer_config peer;
@@ -28,18 +33,23 @@ struct network_runtime {
     uint64_t reply_connection;
     char reply_id[SALE_ID_SIZE];
     int reply_code;
+    delayed_frame *delayed;
 };
 
 typedef struct {
     network_runtime *runtime;
     int socket, connecting, ready, hello_sent, waiting_ack, waiting_worker, pending, pong;
     uint64_t generation;
-    int64_t started, last_rx, last_tx, sent_at, retry_at;
+    int64_t started, last_rx, last_tx, sent_at, retry_at, received_at;
+    size_t delayed_head, delayed_count;
+    unsigned int peer_delay_ms;
     size_t cursor, rx_length, tx_length, tx_sent;
     unsigned char rx[4096], tx[WIRE_HEADER + WIRE_MAX];
     char outstanding[SALE_ID_SIZE];
     work_request incoming;
 } connection_state;
+
+static int stopping(network_runtime *runtime);
 
 static void checked(int result)
 {
@@ -85,14 +95,18 @@ static void progress(network_runtime *network, int connected, size_t acknowledge
     checked(pthread_mutex_unlock(&network->mutex));
 }
 
-static void disconnect_peer(connection_state *state)
+static void disconnect_peer(connection_state *state, const char *reason)
 {
+    int was_ready = state->ready;
     if (state->socket >= 0) close(state->socket);
     network_runtime *runtime = state->runtime;
     uint64_t generation = state->generation;
     *state = (connection_state){ .runtime = runtime, .socket = -1, .generation = generation,
                                .retry_at = milliseconds() + runtime->config.timeout_ms };
     progress(runtime, 0, 0);
+    if (was_ready && !stopping(runtime))
+        fprintf(stderr, "Se perdió la conexión con la tienda %s en la cadena %s (%s).\n",
+                runtime->peer.id, runtime->config.chain_id, reason);
 }
 
 static void establish(connection_state *state, int fd, int connecting)
@@ -130,8 +144,9 @@ static void prepare_output(connection_state *state)
     network_runtime *runtime = state->runtime;
     if (!state->hello_sent) {
         char hello[128];
-        int n = snprintf(hello, sizeof hello, "%s %s %" PRId64,
-                         runtime->config.chain_id, runtime->config.store_id, runtime->config.limit_cent);
+        int n = snprintf(hello, sizeof hello, "%s %s %" PRId64 " %u",
+                         runtime->config.chain_id, runtime->config.store_id, runtime->config.limit_cent,
+                         runtime->config.network_delay_ms);
         frame(state, HELLO, hello, (size_t)n); state->hello_sent = 1; return;
     }
     if (!state->ready) return;
@@ -155,22 +170,31 @@ static void prepare_output(connection_state *state)
         state->waiting_ack = 1; state->sent_at = milliseconds();
         return;
     }
-    int64_t interval = runtime->config.timeout_ms / 2;
+    int64_t interval = ((int64_t)runtime->config.timeout_ms + runtime->config.network_delay_ms + state->peer_delay_ms) / 2;
     if (!interval) interval = 1;
     if (milliseconds() - state->last_tx >= interval) frame(state, PING, NULL, 0);
 }
 
-static int valid_hello(const connection_state *state, const char *body)
+static int valid_hello(connection_state *state, const char *body)
 {
-    char chain[33], identity[33], limit[21], extra;
-    if (sscanf(body, "%32s %32s %20s %c", chain, identity, limit, &extra) != 3) return 0;
+    char chain[33], identity[33], limit[21], delay[16], extra;
+    int fields = sscanf(body, "%32s %32s %20s %15s %c", chain, identity, limit, delay, &extra);
+    if (fields != 3 && fields != 4) return 0;
     for (char *p = limit; *p; p++) if (*p < '0' || *p > '9') return 0;
     errno = 0;
     char *end;
     intmax_t value = strtoimax(limit, &end, 10);
-    /* El límite anunciado es local al par, no una condición de pertenencia a la cadena. */
-    return !errno && !*end && value > 0 && value <= INT64_MAX &&
-           !strcmp(chain, state->runtime->config.chain_id) && !strcmp(identity, state->runtime->peer.id);
+    if (errno || *end || value <= 0 || value > INT64_MAX ||
+        strcmp(chain, state->runtime->config.chain_id) || strcmp(identity, state->runtime->peer.id)) return 0;
+    unsigned long lag = 0;
+    if (fields == 4) {
+        for (char *p = delay; *p; p++) if (*p < '0' || *p > '9') return 0;
+        errno = 0;
+        lag = strtoul(delay, &end, 10);
+        if (errno || *end || lag > 60000) return 0;
+    }
+    state->peer_delay_ms = (unsigned int)lag;
+    return 1;
 }
 
 static int handle_frame(connection_state *state, unsigned char type, char *body)
@@ -202,18 +226,31 @@ static int handle_frame(connection_state *state, unsigned char type, char *body)
 
 static int process_input(connection_state *state)
 {
-    while (!state->pending && !state->waiting_worker && state->rx_length >= WIRE_HEADER) {
+    size_t capacity = state->runtime->config.queue_capacity;
+    /* Reconstruir mensajes ahora, entregarlos al protocolo cuando venza su atraso. */
+    while (state->delayed_count < capacity && state->rx_length >= WIRE_HEADER) {
         unsigned char *header = state->rx;
         uint32_t size;
         memcpy(&size, header + 8, 4); size = ntohl(size);
         if (memcmp(header, "BLK6", 4) || header[4] != 1 || header[6] || header[7] || size >= WIRE_MAX) return -1;
         size_t length = WIRE_HEADER + (size_t)size;
         if (state->rx_length < length) break;
-        char body[WIRE_MAX];
-        memcpy(body, header + WIRE_HEADER, size); body[size] = '\0';
-        if (memchr(body, '\0', size) || handle_frame(state, header[5], body) < 0) return -1;
+        size_t tail = (state->delayed_head + state->delayed_count) % capacity;
+        delayed_frame *message = &state->runtime->delayed[tail];
+        memcpy(message->body, header + WIRE_HEADER, size); message->body[size] = '\0';
+        if (memchr(message->body, '\0', size)) return -1;
+        message->type = header[5];
+        message->due = state->received_at + state->runtime->config.network_delay_ms;
+        state->delayed_count++;
         memmove(state->rx, state->rx + length, state->rx_length - length);
         state->rx_length -= length;
+    }
+    while (!state->pending && !state->waiting_worker && state->delayed_count) {
+        delayed_frame *message = &state->runtime->delayed[state->delayed_head];
+        if (message->due > milliseconds()) break;
+        if (handle_frame(state, message->type, message->body) < 0) return -1;
+        state->delayed_head = (state->delayed_head + 1) % capacity;
+        state->delayed_count--;
     }
     if (state->pending) {
         int result = queue_try_put(state->runtime->queue, state->incoming);
@@ -256,7 +293,7 @@ static void *network_loop(void *argument)
         if (state.socket < 0) dial(&state);
         if (process_input(&state) < 0) {
             fputs("Mensaje de red rechazado; se reinicia la conexión.\n", stderr);
-            disconnect_peer(&state); continue;
+            disconnect_peer(&state, "mensaje inválido"); continue;
         }
         prepare_output(&state);
         struct pollfd descriptors[3] = {
@@ -266,10 +303,23 @@ static void *network_loop(void *argument)
         };
         if (state.socket >= 0) {
             if (state.connecting || state.tx_sent < state.tx_length) descriptors[1].events |= POLLOUT;
-            if (!state.connecting && !state.pending && !state.waiting_worker) descriptors[1].events |= POLLIN;
+            if (!state.connecting && !state.pending && !state.waiting_worker &&
+                state.delayed_count < runtime->config.queue_capacity && state.rx_length < sizeof state.rx)
+                descriptors[1].events |= POLLIN;
+        }
+        int wait_ms = interval;
+        if (state.delayed_count && !state.pending && !state.waiting_worker) {
+            int64_t remaining = runtime->delayed[state.delayed_head].due - milliseconds();
+            if (remaining < 0) remaining = 0;
+            if (remaining < wait_ms) wait_ms = (int)remaining;
+        }
+        if (state.rx_length >= WIRE_HEADER && state.delayed_count < runtime->config.queue_capacity) {
+            uint32_t buffered;
+            memcpy(&buffered, state.rx + 8, 4); buffered = ntohl(buffered);
+            if (buffered < WIRE_MAX && state.rx_length >= WIRE_HEADER + buffered) wait_ms = 0;
         }
         int n;
-        do { n = poll(descriptors, 3, interval); } while (n < 0 && errno == EINTR);
+        do { n = poll(descriptors, 3, wait_ms); } while (n < 0 && errno == EINTR);
         if (n < 0 || descriptors[0].revents & (POLLERR | POLLNVAL)) {
             perror("Esperar red"); queue_stop(runtime->queue, QUEUE_ERROR);
             ssize_t ignored;
@@ -288,30 +338,37 @@ static void *network_loop(void *argument)
         }
         if (descriptors[1].fd != state.socket || state.socket < 0) continue;
         short events = descriptors[1].revents;
-        if (events & (POLLERR | POLLNVAL)) { disconnect_peer(&state); continue; }
+        if (events & (POLLERR | POLLNVAL)) { disconnect_peer(&state, "error de transporte"); continue; }
         if (state.connecting && events & POLLOUT) {
             int error = 0; socklen_t length = sizeof error;
             if (getsockopt(state.socket, SOL_SOCKET, SO_ERROR, &error, &length) < 0 || error) {
-                disconnect_peer(&state); continue;
+                disconnect_peer(&state, "conexión no disponible"); continue;
             }
             state.connecting = 0;
         }
         if (!state.connecting && events & POLLOUT && state.tx_sent < state.tx_length) {
             ssize_t sent = send(state.socket, state.tx + state.tx_sent, state.tx_length - state.tx_sent, MSG_NOSIGNAL);
             if (sent > 0) { state.tx_sent += (size_t)sent; state.last_tx = milliseconds(); }
-            else if (!sent || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) { disconnect_peer(&state); continue; }
+            else if (!sent || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+                disconnect_peer(&state, "fallo de envío"); continue;
+            }
         }
         if (!state.connecting && events & (POLLIN | POLLHUP)) {
             ssize_t received = recv(state.socket, state.rx + state.rx_length, sizeof state.rx - state.rx_length, 0);
-            if (received > 0) { state.rx_length += (size_t)received; state.last_rx = milliseconds(); }
-            else if (!received || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) { disconnect_peer(&state); continue; }
+            if (received > 0) {
+                state.rx_length += (size_t)received;
+                state.received_at = state.last_rx = milliseconds();
+            } else if (!received || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+                disconnect_peer(&state, !received ? "el par cerró la conexión" : "fallo de recepción"); continue;
+            }
         }
         int64_t now = milliseconds(), timeout = runtime->config.timeout_ms;
-        if ((!state.ready && now - state.started > timeout) ||
-            (state.waiting_ack && now - state.sent_at > timeout) || now - state.last_rx > timeout * 3)
-            disconnect_peer(&state);
+        int64_t lag = (int64_t)runtime->config.network_delay_ms + state.peer_delay_ms;
+        if ((!state.ready && now - state.started > timeout + runtime->config.network_delay_ms) ||
+            (state.waiting_ack && now - state.sent_at > timeout + lag) || now - state.last_rx > timeout * 3 + lag)
+            disconnect_peer(&state, "plazo de respuesta agotado");
     }
-    disconnect_peer(&state);
+    disconnect_peer(&state, "servicio de red detenido");
     return NULL;
 }
 
@@ -353,8 +410,8 @@ void network_status(network_runtime *network)
     int connected = network->connected;
     size_t pending = network->count - network->acknowledged;
     checked(pthread_mutex_unlock(&network->mutex));
-    printf("Par: %s | Red: %s | Entregas sin confirmar en esta conexión: %zu\n",
-           network->peer.id, connected ? "CONECTADA" : "DESCONECTADA", pending);
+    printf("Par: %s | Red: %s | Entregas sin confirmar en esta conexión: %zu | Atraso de recepción: %u ms\n",
+           network->peer.id, connected ? "CONECTADA" : "DESCONECTADA", pending, network->config.network_delay_ms);
 }
 
 network_runtime *network_start(const store_config *config, const sales_journal *journal,
@@ -366,6 +423,8 @@ network_runtime *network_start(const store_config *config, const sales_journal *
     runtime->config = *config; runtime->queue = queue; runtime->console_wake = console_wake;
     int result = pthread_mutex_init(&runtime->mutex, NULL);
     if (result) { free(runtime); errno = result; return NULL; }
+    runtime->delayed = calloc(config->queue_capacity, sizeof *runtime->delayed);
+    if (!runtime->delayed) goto failure;
     if (peers_load(config, &runtime->peer) < 0) goto failure;
     if (pipe(runtime->wake) < 0 || nonblocking(runtime->wake[0]) < 0 || nonblocking(runtime->wake[1]) < 0) goto failure;
     for (size_t i = 0; i < journal->count; i++) {
@@ -388,7 +447,7 @@ failure:
     if (runtime->wake[0] >= 0) close(runtime->wake[0]);
     if (runtime->wake[1] >= 0) close(runtime->wake[1]);
     checked(pthread_mutex_destroy(&runtime->mutex));
-    free(runtime->records); free(runtime);
+    free(runtime->delayed); free(runtime->records); free(runtime);
     return NULL;
 }
 
@@ -406,5 +465,5 @@ void network_destroy(network_runtime *network)
     network_quiesce(network);
     close(network->listener); close(network->wake[0]); close(network->wake[1]);
     checked(pthread_mutex_destroy(&network->mutex));
-    free(network->records); free(network);
+    free(network->delayed); free(network->records); free(network);
 }

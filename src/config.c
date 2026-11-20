@@ -34,7 +34,7 @@ static int identifier(const char *value)
     return 0;
 }
 
-static int number(const char *value, int64_t maximum, int64_t *result)
+static int number(const char *value, int64_t minimum, int64_t maximum, int64_t *result)
 {
     if (*value == '\0') return -1;
     for (const char *p = value; *p; p++) {
@@ -43,7 +43,7 @@ static int number(const char *value, int64_t maximum, int64_t *result)
     char *end = NULL;
     errno = 0;
     intmax_t parsed = strtoimax(value, &end, 10);
-    if (errno != 0 || *end != '\0' || parsed < 1 || parsed > maximum) return -1;
+    if (errno != 0 || *end != '\0' || parsed < minimum || parsed > maximum) return -1;
     *result = (int64_t)parsed;
     return 0;
 }
@@ -52,9 +52,9 @@ int config_load(const char *path, store_config *config, FILE *errors)
 {
     static const char *keys[] = {
         "store_id", "chain_id", "bind_address", "port", "limit_cent",
-        "timeout_ms", "queue_capacity", "data_dir", "peers_file"
+        "timeout_ms", "queue_capacity", "data_dir", "peers_file", "network_delay_ms"
     };
-    store_config candidate = {0};
+    store_config candidate = { .network_delay_ms = 10000 };
     unsigned int seen = 0;
     unsigned int line_number = 0;
     int failed = 0;
@@ -115,18 +115,18 @@ int config_load(const char *path, store_config *config, FILE *errors)
                 result = copy_text(candidate.bind_address, sizeof candidate.bind_address, value);
             break;
         case 3:
-            result = number(value, 65535, &numeric);
+            result = number(value, 1, 65535, &numeric);
             if (result == 0) candidate.port = (unsigned int)numeric;
             break;
         case 4:
-            result = number(value, INT64_MAX, &candidate.limit_cent);
+            result = number(value, 1, INT64_MAX, &candidate.limit_cent);
             break;
         case 5:
-            result = number(value, 3600000, &numeric);
+            result = number(value, 1, 3600000, &numeric);
             if (result == 0) candidate.timeout_ms = (unsigned int)numeric;
             break;
         case 6:
-            result = number(value, 1000000, &numeric);
+            result = number(value, 1, 1000000, &numeric);
             if (result == 0) candidate.queue_capacity = (unsigned int)numeric;
             break;
         case 7:
@@ -134,6 +134,10 @@ int config_load(const char *path, store_config *config, FILE *errors)
             break;
         case 8:
             result = copy_text(candidate.peers_file, sizeof candidate.peers_file, value);
+            break;
+        case 9:
+            result = number(value, 0, 60000, &numeric);
+            if (result == 0) candidate.network_delay_ms = (unsigned int)numeric;
             break;
         }
         if (result != 0) {
@@ -149,7 +153,8 @@ int config_load(const char *path, store_config *config, FILE *errors)
         fprintf(errors, "Error al cerrar %s.\n", path);
         failed = 1;
     }
-    if (seen != (1U << (sizeof keys / sizeof keys[0])) - 1U) {
+    const unsigned int required = (1U << 9) - 1U;
+    if ((seen & required) != required) {
         fprintf(errors, "%s: faltan claves obligatorias.\n", path);
         failed = 1;
     }
