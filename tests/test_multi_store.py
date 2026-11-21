@@ -23,7 +23,7 @@ def receive(sock):
             data += part
         return data
     magic, version, kind, reserved, length = struct.unpack("!4sBBHI", exact(12))
-    if magic != b"BLK6" or version != 1 or reserved or length >= 4096:
+    if magic != b"BLK6" or version != 2 or reserved or length >= 4096:
         raise ValueError("Mensaje inválido")
     return kind, exact(length)
 
@@ -110,7 +110,7 @@ class HoldingPeer:
             thread.join(timeout=2)
 
 
-class MultipleStores(unittest.TestCase):
+class StoreFixture:
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="blackout-multi-")
         self.addCleanup(self.temp.cleanup)
@@ -139,8 +139,8 @@ class MultipleStores(unittest.TestCase):
         path = self.folder / f"{name}.conf"
         path.write_text(text)
 
-    def start(self, name):
-        store = RunningStore(self.folder / f"{name}.conf")
+    def start(self, name, fault=None):
+        store = RunningStore(self.folder / f"{name}.conf", fault=fault)
         self.running.append(store)
         self.current[name] = store
         self.addCleanup(lambda: not store.closed and store.stop(kill=True))
@@ -186,6 +186,7 @@ class MultipleStores(unittest.TestCase):
         return all(len(rows_) == count for rows_ in values) and all(
             {tuple(row.items()) for row in rows_} == {tuple(row.items()) for row in values[0]} for rows_ in values)
 
+class MultipleStores(StoreFixture, unittest.TestCase):
     def test_origin_first_then_incorporation_order(self):
         self.start("A"); self.start("B"); self.settle("AB")
         self.start("C"); self.settle()
@@ -308,20 +309,19 @@ class MultipleStores(unittest.TestCase):
         self.current["C"].send("venta 50\n")
         self.until(lambda: self.equal("AC", 1))
 
-    def test_simultaneous_origins_and_independent_limits(self):
+    def test_simultaneous_origins_and_shared_limit(self):
         for name in "ABC":
-            self.configure(name, limit=100)
+            self.configure(name, limit=100, delay=200)
             self.start(name)
         self.settle()
         for name in "ABC":
             self.current[name].send("venta 50\n")
         self.until(lambda: self.equal("ABC", 3))
         for name in "ABC":
-            self.assertIn(b"ABIERTA", self.status(name).splitlines()[0])
+            self.assertIn(b"SOLO_CONSULTA", self.status(name).splitlines()[0])
         self.current["A"].send("venta 50\n")
-        self.until(lambda: self.equal("ABC", 4))
-        self.assertIn(b"SOLO_CONSULTA", self.status("A").splitlines()[0])
-        self.assertIn(b"ABIERTA", self.status("B").splitlines()[0])
+        self.until(lambda: b"Venta rechazada" in self.current["A"].errors)
+        self.assertTrue(self.equal("ABC", 3))
 
     def test_control_logs_recover_partial_tail_and_reject_complete_corruption(self):
         for name, filename in (("A", "routes.log"), ("B", "membership.log")):

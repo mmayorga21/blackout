@@ -7,7 +7,7 @@
 #include "sale.h"
 #include "route.h"
 
-typedef enum { REQUEST_SALE, REQUEST_STATUS, REQUEST_HISTORY, REQUEST_HELP, REQUEST_REMOTE, REQUEST_PROGRESS } request_kind;
+typedef enum { REQUEST_SALE, REQUEST_STATUS, REQUEST_HISTORY, REQUEST_HELP, REQUEST_REMOTE, REQUEST_PROGRESS, REQUEST_DISCONNECT, REQUEST_CONNECT, REQUEST_CLOSE, REQUEST_SYNC, REQUEST_CHECKPOINT, REQUEST_EXIT } request_kind;
 typedef struct {
     request_kind kind;
     int64_t amount;
@@ -17,6 +17,7 @@ typedef struct {
     char sender[33];
     int normal;
     char route_wire[ROUTE_WIRE_SIZE];
+    char scope[2048];
     size_t target;
     uint64_t route_version;
     char progress;

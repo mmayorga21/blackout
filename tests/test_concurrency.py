@@ -113,7 +113,7 @@ class ConcurrentStore(unittest.TestCase):
         self.assertIsNone(process.poll())
         # Consultas enviadas después de confirmar el límite, sin cerrar stdin.
         process.stdin.write(b"historial\nestado\nventa 1\nhistorial\nayuda\n")
-        out = self.read_until(process, b"venta CENTAVOS | estado | historial | ayuda | salir\n")
+        out = self.read_until(process, b"venta CENTAVOS | estado | historial | ayuda | desconectar | conectar | cerrar | salir\n")
         self.assertEqual(out.count(b"D:1 |"), 2)
         self.assertIn(b"Estado: SOLO_CONSULTA", out)
         self.assertIsNone(process.poll())

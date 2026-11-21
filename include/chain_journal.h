@@ -5,6 +5,7 @@
 #include "sale.h"
 
 int chain_open(sales_journal *journal, const store_config *config);
+int chain_prepare(const sales_journal *journal, int64_t amount, sale_record *sale);
 int chain_local(sales_journal *journal, int64_t amount);
 /* 0 nueva; 1 duplicada; 2 inválida/conflicto; -1 fallo de almacenamiento. */
 int chain_receive(sales_journal *journal, const sale_record *sale);

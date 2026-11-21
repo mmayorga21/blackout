@@ -2,6 +2,7 @@
 #include "network.h"
 #include "chain_journal.h"
 #include "membership.h"
+#include "chain_state.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -16,23 +17,33 @@
 #include <unistd.h>
 
 enum { HEADER = 12, MAX_CONNECTIONS = PEERS_MAX * 2, HELLO = 1, SALE = 2, ACK = 3,
-       PING = 4, PONG = 5, REJECT = 6, MEMBERS = 7, NOTICE = 8, RECOVER = 9, DEFER = 10, BYE = 11 };
+       PING = 4, PONG = 5, REJECT = 6, MEMBERS = 7, NOTICE = 8, RECOVER = 9, DEFER = 10, BYE = 11, FREEZE = 12, INVENTORY = 13, ORPHAN = 14 };
 typedef struct {
     sale_route route;
     int applied, control_pending, restore_queued;
-    int64_t ready_at, target_since;
+    int64_t ready_at, target_since, restore_after;
     char event;
     size_t event_target;
     uint64_t event_version;
-    uint64_t ack_token[PEERS_MAX], ack_version[PEERS_MAX];
+    uint64_t ack_token[PEERS_MAX], ack_version[PEERS_MAX], registered_token[PEERS_MAX];
+    int64_t retry_delivery[PEERS_MAX];
 } shared_route;
+enum { SCOPE_SIZE = 2048 };
+typedef struct {
+    sale_record *records;
+    size_t count, cursor, total;
+    uint64_t epoch, revision, token;
+    int frozen;
+    char scope[SCOPE_SIZE];
+} inventory_cut;
 typedef struct { uint64_t token; int code; char id[SALE_ID_SIZE]; } reply_slot;
 typedef struct { char id[96], text[160]; } chain_notice;
 typedef struct {
     int fd, outgoing, connecting, ready, legacy, hello_sent, waiting_ack, waiting_worker, pending, pong, leaving;
     size_t peer, tx_length, tx_sent, rx_length, outstanding_target, notice_cursor;
     uint64_t token, sent_revision, outstanding_version, incarnation;
-    int outstanding_normal;
+    int outstanding_normal, freeze_sent;
+    inventory_cut incoming_cut, outgoing_cut;
     char outstanding[SALE_ID_SIZE];
     int64_t started, last_rx, last_tx, sent_at;
     unsigned char rx[ROUTE_WIRE_SIZE * 2], tx[HEADER + ROUTE_WIRE_SIZE];
@@ -45,6 +56,13 @@ struct network_runtime {
     int console_wake, wake[2], listener, stopping, joined;
     pthread_t thread;
     pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    chain_state state; /* Solo el trabajador escribe; apertura antes de crear hilos. */
+    int offline_desired, offline_active, frozen_requested, frozen_durable;
+    int sync_queued, checkpoint_queued, exit_prepared;
+    uint64_t sales_revision, certified_revision;
+    char certified_scope[SCOPE_SIZE];
+    inventory_cut cuts[PEERS_MAX];
     membership_book book;             /* Solo el hilo de red la modifica. */
     route_log routes;                 /* Solo el trabajador la modifica. */
     chain_member view[PEERS_MAX];     /* Instantánea protegida para el trabajador. */
@@ -62,6 +80,15 @@ struct network_runtime {
     chain_notice *notices;
     size_t notice_count, notice_capacity;
 };
+
+static int inventory_input(network_runtime *network, peer_connection *connection, char *body);
+static int inventory_output(network_runtime *network, peer_connection *connection);
+static void synchronization_tasks(network_runtime *network);
+static int connectivity(network_runtime *network);
+static int open_listener(network_runtime *network);
+static int offline(network_runtime *network);
+static void scope_locked(network_runtime *network, char *scope);
+static int known_sale_locked(network_runtime *network, size_t peer, const sale_record *sale);
 
 static void checked(int result)
 {
@@ -112,11 +139,12 @@ static void refresh_view(network_runtime *network)
     for (size_t i = 0; i < network->book.count; i++) {
         network->view[i] = network->book.members[i];
         int slot = network->active[i];
-        network->online[i] = i == network->own || (slot >= 0 && network->connections[slot].ready &&
+        network->online[i] = i == network->own || (!network->offline_desired && slot >= 0 && network->connections[slot].ready &&
                              !network->connections[slot].leaving && !network->view[i].provisional &&
                              network->connections[slot].incarnation == network->view[i].incarnation);
         network->online_token[i] = slot >= 0 ? network->connections[slot].token : 0;
     }
+    checked(pthread_cond_broadcast(&network->changed));
     checked(pthread_mutex_unlock(&network->mutex));
 }
 static size_t record_find(network_runtime *network, const char *id)
@@ -139,14 +167,19 @@ static int merge_record(network_runtime *network, const sale_route *route, int a
         position = network->count++;
         network->records[position] = (shared_route){ .route = *route, .ready_at = ready };
     } else if (route->version >= network->records[position].route.version) network->records[position].route = *route;
-    if (applied) network->records[position].applied = 1;
+    if (applied && !network->records[position].applied) {
+        network->records[position].applied = 1;
+        if (network->sales_revision == UINT64_MAX) goto no_memory;
+        network->sales_revision++;
+    }
+    checked(pthread_cond_broadcast(&network->changed));
     checked(pthread_mutex_unlock(&network->mutex));
     network_notify(network); return 0;
 no_memory:
     checked(pthread_mutex_unlock(&network->mutex)); errno = ENOMEM; return -1;
 }
 
-int network_publish(network_runtime *network, const sale_record *sale, int defer)
+static int persist_route(network_runtime *network, const sale_record *sale, int defer, sale_route *prepared)
 {
     if (!network) return 0;
     size_t found = route_log_find(&network->routes, sale->id);
@@ -156,7 +189,7 @@ int network_publish(network_runtime *network, const sale_record *sale, int defer
         chain_member sorted[PEERS_MAX]; size_t count = 0;
         checked(pthread_mutex_lock(&network->mutex));
         for (size_t i = 0; i < network->member_count; i++)
-            if (i != network->own && network->online[i] && !network->view[i].provisional) sorted[count++] = network->view[i];
+            if (!network->offline_desired && i != network->own && network->online[i] && !network->view[i].provisional) sorted[count++] = network->view[i];
         checked(pthread_mutex_unlock(&network->mutex));
         for (size_t i = 1; i < count; i++) {
             chain_member value = sorted[i]; size_t j = i;
@@ -173,11 +206,31 @@ int network_publish(network_runtime *network, const sale_record *sale, int defer
         }
     }
     if (found == SIZE_MAX && route_log_put(&network->routes, &route) != 0) return -1;
+    *prepared = route;
+    return 0;
+}
+
+int network_publish(network_runtime *network, const sale_record *sale, int defer)
+{
+    sale_route route;
+    if (persist_route(network, sale, defer, &route) < 0) return -1;
     return merge_record(network, &route, 1, defer ? milliseconds() + network->config.sale_share_delay_ms : 0);
+}
+
+int network_local(network_runtime *network, sales_journal *journal, int64_t amount)
+{
+    sale_record sale; sale_route route;
+    /* routes.log es el registro previo: contiene venta y recorrido completos. */
+    if (chain_prepare(journal, amount, &sale) < 0 || persist_route(network, &sale, 1, &route) < 0 ||
+        chain_receive(journal, &sale) != 0) return -1;
+    if (merge_record(network, &route, 1, milliseconds() + network->config.sale_share_delay_ms) < 0) return -1;
+    fprintf(display_output(), "Venta aceptada: %s | Importe: %" PRId64 " centavos\n", sale.id, sale.amount);
+    return 0;
 }
 
 int network_receive(network_runtime *network, const work_request *request, sales_journal *journal)
 {
+    if (request->connection && offline(network)) return 3;
     sale_route incoming;
     if (route_decode(request->route_wire, &incoming) < 0) return 2;
     if (request->normal && strcmp(request->sender, incoming.sale.origin)) return 2;
@@ -188,12 +241,28 @@ int network_receive(network_runtime *network, const work_request *request, sales
     sale_route route = network->routes.records[position];
     checked(pthread_mutex_lock(&network->mutex));
     uint64_t incarnation = network->view[network->own].incarnation;
+    int orphan = request->progress == 'O' && network->frozen_durable;
+    char scope[SCOPE_SIZE]; scope_locked(network, scope);
+    orphan = orphan && !strcmp(scope, request->scope);
+    for (size_t i = 0; i < network->member_count; i++)
+        if (!strcmp(network->view[i].peer.id, incoming.sale.origin) && network->online[i]) orphan = 0;
     checked(pthread_mutex_unlock(&network->mutex));
     sale_record existing;
     int present = chain_lookup(journal, route.sale.id, &existing);
     if (present && (existing.amount != route.sale.amount || strcmp(existing.stamp, route.sale.stamp))) return 2;
-    if (!present && !route_eligible(&route, journal->store_id, incarnation, request->normal))
-        return merge_record(network, &route, 0, 0) < 0 ? -1 : 3;
+    if (!present && !orphan && !route_eligible(&route, journal->store_id, incarnation, request->normal)) {
+        if (merge_record(network, &route, 0, 0) < 0) return -1;
+        if (!request->connection) {
+            checked(pthread_mutex_lock(&network->mutex));
+            size_t shared = record_find(network, route.sale.id);
+            if (shared != SIZE_MAX) {
+                network->records[shared].restore_queued = 0;
+                network->records[shared].restore_after = milliseconds() + network->config.timeout_ms;
+            }
+            checked(pthread_mutex_unlock(&network->mutex));
+        }
+        return 3;
+    }
     int result = chain_receive(journal, &route.sale);
     if (result < 0 || result == 2) return result;
     return merge_record(network, &route, 1, 0) < 0 ? -1 : result;
@@ -231,7 +300,7 @@ void network_reply(network_runtime *network, const work_request *request, const 
 
 static void frame(peer_connection *connection, unsigned char type, const void *body, size_t length)
 {
-    memcpy(connection->tx, "BLK6", 4); connection->tx[4] = 1; connection->tx[5] = type;
+    memcpy(connection->tx, "BLK6", 4); connection->tx[4] = 2; connection->tx[5] = type;
     connection->tx[6] = connection->tx[7] = 0;
     uint32_t size = htonl((uint32_t)length); memcpy(connection->tx + 8, &size, 4);
     if (length) memcpy(connection->tx + HEADER, body, length);
@@ -272,6 +341,7 @@ static void disconnect(network_runtime *network, size_t slot, const char *reason
         network->active[peer] = -1; network->retry[peer] = milliseconds() + network->config.timeout_ms;
         if (connection->ready && announce) network->lost_pending[peer] = 1;
     }
+    free(connection->incoming_cut.records); free(connection->outgoing_cut.records);
     *connection = (peer_connection){ .fd = -1, .peer = SIZE_MAX };
     if (peer < network->book.count && network->lost_pending[peer]) {
         int candidate = 0;
@@ -303,6 +373,10 @@ static int hello(network_runtime *network, size_t slot, const char *body)
     for (char *p = limit; *p; p++) if (*p < '0' || *p > '9') return -1;
     errno = 0; char *end; intmax_t value = strtoimax(limit, &end, 10);
     if (errno || *end || value <= 0 || value > INT64_MAX) return -1;
+    if (value != network->config.limit_cent) {
+        display_notice("Límite de cadena incompatible con %s; conexión rechazada.\n", id);
+        return -1;
+    }
     int fields = sscanf(body, "%32s %32s %20s %159[^\n]", chain, id, limit, rest);
     chain_member member;
     if (fields == 3) {
@@ -353,20 +427,43 @@ static int handle(network_runtime *network, size_t slot, unsigned char type, cha
 {
     peer_connection *connection = &network->connections[slot];
     if (type == HELLO) return connection->ready ? -1 : hello(network, slot, body);
-    if (!connection->ready) return -1;
+    if (!connection->ready || offline(network)) return -1;
+    if (type == FREEZE) {
+        if (*body) return -1;
+        checked(pthread_mutex_lock(&network->mutex));
+        network->frozen_requested = 1;
+        checked(pthread_cond_broadcast(&network->changed));
+        checked(pthread_mutex_unlock(&network->mutex));
+        return 0;
+    }
+    if (type == INVENTORY) return inventory_input(network, connection, body);
     if (type == ACK || type == DEFER) {
         if (!connection->waiting_ack || strcmp(body, connection->outstanding)) return -1;
         checked(pthread_mutex_lock(&network->mutex));
         size_t found = record_find(network, body);
         if (found != SIZE_MAX) {
             shared_route *record = &network->records[found];
-            record->ack_token[connection->peer] = connection->token;
-            record->ack_version[connection->peer] = connection->outstanding_version;
+            if (type == ACK) record->registered_token[connection->peer] = connection->token;
+            if (type == ACK) {
+                record->ack_token[connection->peer] = connection->token;
+                record->ack_version[connection->peer] = connection->outstanding_version;
+                record->retry_delivery[connection->peer] = 0;
+            } else {
+                record->ack_token[connection->peer] = 0;
+                record->retry_delivery[connection->peer] = milliseconds() + network->config.timeout_ms;
+            }
             if (connection->outstanding_normal && record->route.version == connection->outstanding_version)
                 mark_progress(network, found, connection->outstanding_target, type == ACK ? 'A' : 'S');
         }
+        checked(pthread_cond_broadcast(&network->changed));
         checked(pthread_mutex_unlock(&network->mutex)); connection->waiting_ack = 0;
-    } else if (type == SALE || type == RECOVER) {
+    } else if (type == SALE || type == RECOVER || type == ORPHAN) {
+        char recovery_scope[SCOPE_SIZE] = "";
+        if (type == ORPHAN) {
+            char *separator = strchr(body, '\n');
+            if (!separator || (size_t)(separator - body) >= sizeof recovery_scope) return -1;
+            memcpy(recovery_scope, body, (size_t)(separator - body)); body = separator + 1;
+        }
         sale_route route;
         if (connection->waiting_worker || connection->pending) return -1;
         if (!strncmp(body, "R7|", 3)) { if (route_decode(body, &route) < 0) return -1; }
@@ -381,6 +478,7 @@ static int handle(network_runtime *network, size_t slot, unsigned char type, cha
         *request = (work_request){ .kind = REQUEST_REMOTE, .connection = connection->token,
             .connection_slot = (unsigned int)slot, .normal = type == SALE && !connection->legacy };
         strcpy(request->sender, network->book.members[connection->peer].peer.id);
+        if (type == ORPHAN) { request->progress = 'O'; strcpy(request->scope, recovery_scope); }
         if (route_encode(&route, request->route_wire, sizeof request->route_wire) < 0 ||
             sale_encode(&route.sale, request->sale_csv, sizeof request->sale_csv) < 0) return -1;
         connection->pending = 1;
@@ -418,7 +516,7 @@ static void prepare_output(network_runtime *network, size_t slot)
                          network->config.store_id, network->config.limit_cent, rest + 1, network->book.clock);
         frame(connection, HELLO, body, (size_t)n); connection->hello_sent = 1; return;
     }
-    if (!connection->ready) return;
+    if (!connection->ready || offline(network)) return;
     checked(pthread_mutex_lock(&network->mutex));
     reply_slot *reply = &network->replies[slot];
     if (reply->code && reply->token == connection->token) {
@@ -427,6 +525,12 @@ static void prepare_output(network_runtime *network, size_t slot)
         checked(pthread_mutex_unlock(&network->mutex)); return;
     }
     checked(pthread_mutex_unlock(&network->mutex));
+    checked(pthread_mutex_lock(&network->mutex));
+    int frozen = network->frozen_durable;
+    checked(pthread_mutex_unlock(&network->mutex));
+    if (frozen && !connection->freeze_sent && !connection->legacy) {
+        frame(connection, FREEZE, NULL, 0); connection->freeze_sent = 1; return;
+    }
     if (connection->pong) { frame(connection, PONG, NULL, 0); connection->pong = 0; return; }
     if (!connection->legacy && connection->notice_cursor < network->notice_count) {
         const chain_notice *notice = &network->notices[connection->notice_cursor++];
@@ -442,12 +546,14 @@ static void prepare_output(network_runtime *network, size_t slot)
         }
         frame(connection, MEMBERS, body, used); connection->sent_revision = network->book.revision; return;
     }
+    if (!connection->legacy && inventory_output(network, connection)) return;
     if (!connection->waiting_ack) {
         checked(pthread_mutex_lock(&network->mutex));
         int64_t now = milliseconds();
         for (size_t i = 0; i < network->count; i++) {
             shared_route *record = &network->records[i]; const sale_route *route = &record->route;
-            if (!record->applied || record->ready_at > now || record->control_pending) continue;
+            if (!record->applied || record->ready_at > now || record->control_pending ||
+                record->retry_delivery[connection->peer] > now) continue;
             if (record->ack_token[connection->peer] == connection->token &&
                 record->ack_version[connection->peer] >= route->version) continue;
             size_t target = route_first_pending(route);
@@ -455,11 +561,31 @@ static void prepare_output(network_runtime *network, size_t slot)
             int normal = !strcmp(route->sale.origin, network->config.store_id) && target < route->count &&
                          !strcmp(route->targets[target].id, peer->peer.id) &&
                          route->targets[target].incarnation == peer->incarnation;
-            if (!normal && !route_eligible(route, peer->peer.id, peer->incarnation, 0)) continue;
+            if (known_sale_locked(network, connection->peer, &route->sale)) {
+                record->registered_token[connection->peer] = connection->token;
+                record->ack_token[connection->peer] = connection->token;
+                record->ack_version[connection->peer] = route->version;
+                if (normal) mark_progress(network, i, target, 'A');
+                checked(pthread_cond_broadcast(&network->changed));
+                continue;
+            }
+            int orphan = 0;
+            if (!normal && !route_eligible(route, peer->peer.id, peer->incarnation, 0)) {
+                int origin_online = 0;
+                for (size_t j = 0; j < network->member_count; j++)
+                    if (!strcmp(network->view[j].peer.id, route->sale.origin) && network->online[j]) origin_online = 1;
+                if (!network->frozen_durable || origin_online || connection->legacy) continue;
+                orphan = 1;
+            }
             char body[ROUTE_WIRE_SIZE];
             int n = connection->legacy ? sale_encode(&route->sale, body, sizeof body) : route_encode(route, body, sizeof body);
             if (n < 0) { checked(pthread_mutex_unlock(&network->mutex)); fatal_network(network, "Serializar recorrido"); return; }
-            frame(connection, normal || connection->legacy ? SALE : RECOVER, body, (size_t)n);
+            if (orphan) {
+                char scoped[ROUTE_WIRE_SIZE], scope[SCOPE_SIZE]; scope_locked(network, scope);
+                int combined = snprintf(scoped, sizeof scoped, "%s\n%s", scope, body);
+                if (combined < 0 || (size_t)combined >= sizeof scoped) continue;
+                frame(connection, ORPHAN, scoped, (size_t)combined);
+            } else frame(connection, normal || connection->legacy ? SALE : RECOVER, body, (size_t)n);
             strcpy(connection->outstanding, route->sale.id);
             connection->outstanding_version = route->version; connection->outstanding_normal = normal;
             connection->outstanding_target = target; connection->waiting_ack = 1; connection->sent_at = now;
@@ -477,7 +603,7 @@ static int process_input(network_runtime *network, size_t slot)
     peer_connection *connection = &network->connections[slot];
     while (!connection->pending && !connection->waiting_worker && connection->rx_length >= HEADER) {
         uint32_t size; memcpy(&size, connection->rx + 8, 4); size = ntohl(size);
-        if (memcmp(connection->rx, "BLK6", 4) || connection->rx[4] != 1 || connection->rx[6] || connection->rx[7] ||
+        if (memcmp(connection->rx, "BLK6", 4) || connection->rx[4] != 2 || connection->rx[6] || connection->rx[7] ||
             size >= ROUTE_WIRE_SIZE) return -1;
         size_t length = HEADER + (size_t)size;
         if (connection->rx_length < length) break;
@@ -502,8 +628,12 @@ static void schedule_controls(network_runtime *network)
     checked(pthread_mutex_lock(&network->mutex));
     for (size_t i = 0; i < network->count; i++) {
         shared_route *record = &network->records[i]; sale_route *route = &record->route;
-        if (!record->applied && !record->restore_queued) {
+        if (!network->offline_desired && !record->applied && !record->restore_queued && record->restore_after <= now) {
             work_request request = { .kind = REQUEST_REMOTE };
+            size_t origin = membership_find(&network->book, route->sale.origin);
+            if (network->frozen_durable && (origin == SIZE_MAX || !network->online[origin])) {
+                request.progress = 'O'; scope_locked(network, request.scope);
+            }
             if (route_encode(route, request.route_wire, sizeof request.route_wire) >= 0 &&
                 sale_encode(&route->sale, request.sale_csv, sizeof request.sale_csv) >= 0 && !queue_try_put(network->queue, request))
                 record->restore_queued = 1;
@@ -589,12 +719,415 @@ static void farewell(network_runtime *network)
     }
 }
 
+static int offline(network_runtime *network)
+{
+    checked(pthread_mutex_lock(&network->mutex)); int value = network->offline_desired;
+    checked(pthread_mutex_unlock(&network->mutex)); return value;
+}
+
+int network_frozen(network_runtime *network)
+{
+    if (!network) return 0;
+    checked(pthread_mutex_lock(&network->mutex)); int value = network->frozen_requested;
+    checked(pthread_mutex_unlock(&network->mutex)); return value;
+}
+
+int network_maintain(network_runtime *network, int64_t total)
+{
+    if (!network) return 0;
+    checked(pthread_mutex_lock(&network->mutex));
+    if (total >= network->config.limit_cent) network->frozen_requested = 1;
+    int frozen = network->frozen_requested;
+    checked(pthread_mutex_unlock(&network->mutex));
+    if (frozen && !network->state.frozen && chain_state_save(&network->state, network->state.offline, 1) < 0) return -1;
+    checked(pthread_mutex_lock(&network->mutex));
+    if (!network->frozen_durable && network->state.frozen)
+        for (size_t i = 0; i < network->count; i++) if (!network->records[i].applied) network->records[i].restore_queued = 0;
+    network->frozen_durable = network->state.frozen; network->sync_queued = 0;
+    checked(pthread_cond_broadcast(&network->changed));
+    checked(pthread_mutex_unlock(&network->mutex)); network_notify(network); return 0;
+}
+
+int network_close_sales(network_runtime *network)
+{
+    if (!network) return 0;
+    checked(pthread_mutex_lock(&network->mutex)); network->frozen_requested = 1;
+    checked(pthread_mutex_unlock(&network->mutex));
+    return network_maintain(network, 0);
+}
+
+int network_connection(network_runtime *network, int connected)
+{
+    if (!network) { fputs("La tienda independiente no utiliza la red de cadena.\n", display_output()); return 0; }
+    int value = !connected;
+    if (network->state.offline == value) {
+        fprintf(display_output(), "La conexión ya está %s.\n", value ? "desactivada" : "activada"); return 0;
+    }
+    if (chain_state_save(&network->state, value, network->state.frozen) < 0) return -1;
+    checked(pthread_mutex_lock(&network->mutex)); network->offline_desired = value;
+    network->certified_revision = 0;
+    checked(pthread_cond_broadcast(&network->changed));
+    checked(pthread_mutex_unlock(&network->mutex)); network_notify(network);
+    struct timespec end; clock_gettime(CLOCK_MONOTONIC, &end); end.tv_sec += 5;
+    checked(pthread_mutex_lock(&network->mutex));
+    int result = 0;
+    while (network->offline_active != value && !result)
+        result = pthread_cond_timedwait(&network->changed, &network->mutex, &end);
+    checked(pthread_mutex_unlock(&network->mutex));
+    if (result) { errno = result; return -1; }
+    fputs(value ? "Red desactivada: solo se registran ventas locales. Usa conectar para volver.\n" :
+                 "Red activada: se recuperarán las ventas pendientes en ambos sentidos.\n", display_output());
+    return 0;
+}
+
+static int open_listener(network_runtime *network)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int reuse = 1;
+    struct sockaddr_in address = { .sin_family = AF_INET, .sin_port = htons((uint16_t)network->config.port) };
+    if (nonblocking(fd) < 0 || setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse) < 0 ||
+        inet_pton(AF_INET, network->config.bind_address, &address.sin_addr) != 1 ||
+        bind(fd, (struct sockaddr *)&address, sizeof address) < 0 || listen(fd, PEERS_MAX) < 0) { close(fd); return -1; }
+    network->listener = fd; return 0;
+}
+
+static int connectivity(network_runtime *network)
+{
+    int desired = offline(network);
+    if (desired == network->offline_active) return 0;
+    if (desired) {
+        for (size_t i = 0; i < MAX_CONNECTIONS; i++) if (network->connections[i].fd >= 0)
+            disconnect(network, i, "aislamiento local", 0);
+        if (network->listener >= 0) close(network->listener);
+        network->listener = -1;
+    } else {
+        chain_member member = network->book.members[network->book.own];
+        if (member.incarnation == UINT64_MAX || network->book.clock == UINT64_MAX) { errno = EOVERFLOW; return -1; }
+        member.incarnation++; member.ticket = network->book.clock + 1; member.provisional = 1;
+        if (membership_update(&network->book, &member) < 0 || open_listener(network) < 0) return -1;
+        memset(network->retry, 0, sizeof network->retry);
+    }
+    checked(pthread_mutex_lock(&network->mutex));
+    network->offline_active = desired;
+    if (!desired) for (size_t i = 0; i < network->count; i++) network->records[i].restore_queued = 0;
+    checked(pthread_cond_broadcast(&network->changed));
+    checked(pthread_mutex_unlock(&network->mutex));
+    refresh_view(network); return 0;
+}
+
+/* Esta vista exacta identifica el grupo conectado, no borra miembros ausentes. */
+static void scope_locked(network_runtime *network, char *scope)
+{
+    size_t order[PEERS_MAX], count = 0;
+    for (size_t i = 0; i < network->member_count; i++)
+        if (i == network->own || network->online[i]) order[count++] = i;
+    for (size_t i = 1; i < count; i++) {
+        size_t value = order[i], j = i;
+        while (j && strcmp(network->view[order[j - 1]].peer.id, network->view[value].peer.id) > 0) {
+            order[j] = order[j - 1]; j--;
+        }
+        order[j] = value;
+    }
+    size_t used = 0;
+    for (size_t i = 0; i < count; i++) {
+        const chain_member *member = &network->view[order[i]];
+        int n = snprintf(scope + used, SCOPE_SIZE - used, "%s%s:%" PRIu64, i ? ";" : "", member->peer.id, member->incarnation);
+        if (n < 0 || (size_t)n >= SCOPE_SIZE - used) exit(EXIT_FAILURE);
+        used += (size_t)n;
+    }
+    scope[used] = '\0';
+}
+static int compare_sale(const void *left, const void *right)
+{
+    return strcmp(((const sale_record *)left)->id, ((const sale_record *)right)->id);
+}
+static sale_record *snapshot_locked(network_runtime *network, size_t *count, int visible_only)
+{
+    *count = 0;
+    if (network->count > (SIZE_MAX / sizeof(sale_record)) - 1) return NULL;
+    sale_record *records = malloc((network->count + 1) * sizeof *records);
+    if (!records) return NULL;
+    for (size_t i = 0; i < network->count; i++) if (network->records[i].applied &&
+        (!visible_only || network->records[i].ready_at <= milliseconds()))
+        records[(*count)++] = network->records[i].route.sale;
+    qsort(records, *count, sizeof *records, compare_sale); return records;
+}
+static int equal_cut(const inventory_cut *cut, const sale_record *records, size_t count)
+{
+    if (cut->count != count) return 0;
+    for (size_t i = 0; i < count; i++)
+        if (strcmp(cut->records[i].id, records[i].id) || strcmp(cut->records[i].stamp, records[i].stamp) ||
+            cut->records[i].amount != records[i].amount) return 0;
+    return 1;
+}
+static int known_sale_locked(network_runtime *network, size_t peer, const sale_record *sale)
+{
+    const inventory_cut *cut = &network->cuts[peer];
+    if (cut->token != network->online_token[peer]) return 0;
+    size_t left = 0, right = cut->count;
+    while (left < right) {
+        size_t middle = left + (right - left) / 2;
+        int result = strcmp(cut->records[middle].id, sale->id);
+        if (result < 0) left = middle + 1;
+        else if (result > 0) right = middle;
+        else return cut->records[middle].amount == sale->amount && !strcmp(cut->records[middle].stamp, sale->stamp);
+    }
+    return 0;
+}
+
+static int parse_number(const char *text, uint64_t *value)
+{
+    if (!*text) return -1;
+    for (const char *p = text; *p; p++) if (*p < '0' || *p > '9') return -1;
+    errno = 0; char *end; uintmax_t n = strtoumax(text, &end, 10);
+    if (errno || *end || n > UINT64_MAX) return -1;
+    *value = (uint64_t)n; return 0;
+}
+
+static int inventory_input(network_runtime *network, peer_connection *connection, char *body)
+{
+    char *lines = strchr(body, '\n'); if (!lines) return -1; *lines++ = '\0';
+    char epoch[21], total[21], offset[21], frozen[2], scope[SCOPE_SIZE], extra;
+    if (sscanf(body, "%20s %20s %20s %1[01] %2047s %c", epoch, total, offset, frozen, scope, &extra) != 5) return -1;
+    uint64_t e, n, o;
+    if (parse_number(epoch, &e) < 0 || !e || parse_number(total, &n) < 0 || parse_number(offset, &o) < 0 ||
+        n > (SIZE_MAX / sizeof(sale_record)) - 1 || o > n) return -1;
+    inventory_cut *cut = &connection->incoming_cut;
+    if (!o) {
+        if (e <= cut->epoch) return -1;
+        free(cut->records); *cut = (inventory_cut){ .epoch = e, .total = (size_t)n, .frozen = frozen[0] - '0' };
+        strcpy(cut->scope, scope);
+    }
+    if (e != cut->epoch || n != cut->total || o != cut->count || strcmp(scope, cut->scope) || cut->frozen != frozen[0] - '0') return -1;
+    size_t added = 0;
+    while (*lines) {
+        char *end = strchr(lines, '\n');
+        if (!end || cut->count >= cut->total || ++added > 4) return -1;
+        size_t length = (size_t)(end - lines) + 1;
+        char csv[SALE_CSV_SIZE]; sale_record sale;
+        if (length >= sizeof csv) return -1;
+        memcpy(csv, lines, length); csv[length] = '\0';
+        if (sale_decode(csv, &sale) < 0 || (cut->count && strcmp(cut->records[cut->count - 1].id, sale.id) >= 0)) return -1;
+        sale_record *records = realloc(cut->records, (cut->count + 1) * sizeof *records);
+        if (!records) return -1;
+        cut->records = records; cut->records[cut->count++] = sale; lines = end + 1;
+    }
+    if (!added && cut->total) return -1;
+    if (cut->count == cut->total) {
+        checked(pthread_mutex_lock(&network->mutex));
+        inventory_cut *published = &network->cuts[connection->peer]; free(published->records);
+        *published = *cut; published->token = connection->token;
+        cut->records = NULL;
+        checked(pthread_cond_broadcast(&network->changed));
+        checked(pthread_mutex_unlock(&network->mutex));
+    }
+    return 0;
+}
+
+static int inventory_output(network_runtime *network, peer_connection *connection)
+{
+    inventory_cut *cut = &connection->outgoing_cut;
+    char scope[SCOPE_SIZE];
+    checked(pthread_mutex_lock(&network->mutex)); scope_locked(network, scope);
+    size_t visible = 0;
+    int64_t now = milliseconds();
+    for (size_t i = 0; i < network->count; i++)
+        if (network->records[i].applied && network->records[i].ready_at <= now) visible++;
+    /* FREEZE detiene compras inmediatamente; el voto solo cubre el inventario completo. */
+    int vote_ready = network->frozen_durable && visible == network->count;
+    int changed = !cut->epoch || cut->count != visible || cut->revision != network->sales_revision || cut->frozen != vote_ready || strcmp(cut->scope, scope);
+    if (changed) {
+        size_t count; sale_record *records = snapshot_locked(network, &count, 1);
+        if (!records || cut->epoch == UINT64_MAX) {
+            free(records); checked(pthread_mutex_unlock(&network->mutex)); fatal_network(network, "Inventario local"); return 0;
+        }
+        free(cut->records); cut->records = records; cut->count = count; cut->cursor = 0;
+        cut->revision = network->sales_revision; cut->frozen = vote_ready;
+        strcpy(cut->scope, scope); cut->epoch++;
+    }
+    checked(pthread_mutex_unlock(&network->mutex));
+    if (cut->cursor > cut->count) return 0;
+    char body[ROUTE_WIRE_SIZE];
+    int n = snprintf(body, sizeof body, "%" PRIu64 " %zu %zu %d %s\n", cut->epoch, cut->count, cut->cursor, cut->frozen, cut->scope);
+    if (n < 0 || (size_t)n >= sizeof body) { fatal_network(network, "Cabecera de inventario"); return 0; }
+    size_t used = (size_t)n, end = cut->cursor + 4;
+    if (end > cut->count) end = cut->count;
+    while (cut->cursor < end) {
+        n = sale_encode(&cut->records[cut->cursor], body + used, sizeof body - used);
+        if (n < 0) { fatal_network(network, "Página de inventario"); return 0; }
+        used += (size_t)n; cut->cursor++;
+    }
+    if (cut->cursor == cut->count) cut->cursor++;
+    frame(connection, INVENTORY, body, used); return 1;
+}
+
+/* Devuelve un corte cerrado exacto; debe llamarse con mutex adquirido. */
+static sale_record *closed_cut_locked(network_runtime *network, size_t *count, char *scope)
+{
+    if (!network->frozen_durable || network->offline_desired || network->stopping) return NULL;
+    scope_locked(network, scope);
+    sale_record *records = snapshot_locked(network, count, 0); if (!records) return NULL;
+    for (size_t i = 0; i < network->count; i++) {
+        shared_route *record = &network->records[i];
+        if (!record->applied) { free(records); return NULL; }
+        if (record->applied && record->ready_at > milliseconds()) { free(records); return NULL; }
+        if (record->control_pending) { free(records); return NULL; }
+        if (!strcmp(record->route.sale.origin, network->config.store_id))
+            for (size_t j = 0; j < record->route.count; j++) if (record->route.targets[j].state == 'P')
+                for (size_t k = 0; k < network->member_count; k++)
+                    if (network->online[k] && !strcmp(network->view[k].peer.id, record->route.targets[j].id) &&
+                        network->view[k].incarnation == record->route.targets[j].incarnation) { free(records); return NULL; }
+    }
+    for (size_t i = 0; i < network->member_count; i++) if (i != network->own && network->online[i]) {
+        inventory_cut *cut = &network->cuts[i];
+        if (cut->token != network->online_token[i] || !cut->frozen || strcmp(cut->scope, scope) || !equal_cut(cut, records, *count)) {
+            free(records); return NULL;
+        }
+    }
+    return records;
+}
+
+static void synchronization_tasks(network_runtime *network)
+{
+    checked(pthread_mutex_lock(&network->mutex));
+    if (network->frozen_requested && !network->frozen_durable && !network->sync_queued) {
+        work_request request = { .kind = REQUEST_SYNC };
+        if (!queue_try_put(network->queue, request)) network->sync_queued = 1;
+    }
+    if (network->frozen_durable && !network->checkpoint_queued) {
+        char scope[SCOPE_SIZE]; size_t count;
+        sale_record *records = closed_cut_locked(network, &count, scope);
+        int changed = records && (network->certified_revision != network->sales_revision || strcmp(network->certified_scope, scope));
+        free(records);
+        if (changed) {
+            work_request request = { .kind = REQUEST_CHECKPOINT };
+            if (!queue_try_put(network->queue, request)) network->checkpoint_queued = 1;
+        }
+    }
+    checked(pthread_mutex_unlock(&network->mutex));
+}
+
+static int certificate_write(int fd, const char *data, size_t length)
+{
+    size_t done = 0;
+    while (done < length) {
+        ssize_t n = write(fd, data + done, length - done);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { if (!n) errno = EIO; return -1; }
+        done += (size_t)n;
+    }
+    return 0;
+}
+
+int network_checkpoint(network_runtime *network)
+{
+    char scope[SCOPE_SIZE]; size_t count;
+    uint64_t epochs[PEERS_MAX] = {0}; chain_member members[PEERS_MAX]; size_t member_count = 0;
+    checked(pthread_mutex_lock(&network->mutex));
+    network->checkpoint_queued = 0;
+    sale_record *records = closed_cut_locked(network, &count, scope);
+    uint64_t revision = network->sales_revision;
+    for (size_t i = 0; i < network->member_count; i++) if (network->online[i]) {
+        epochs[member_count] = network->cuts[i].epoch; members[member_count++] = network->view[i];
+    }
+    checked(pthread_mutex_unlock(&network->mutex));
+    if (!records) return 0;
+    int fd = control_open(network->config.data_dir, ".close.pending");
+    int failed = fd < 0;
+    if (!failed && (ftruncate(fd, 0) < 0 || lseek(fd, 0, SEEK_SET) < 0)) failed = 1;
+    char line[ROUTE_WIRE_SIZE];
+    int n = snprintf(line, sizeof line, "CLOSE8 %" PRId64 " %zu %s", network->config.limit_cent, count, scope);
+    if (!failed) {
+        int tail = snprintf(line + n, sizeof line - (size_t)n, "|%08" PRIx32 "\n", sale_crc(line, (size_t)n));
+        if (certificate_write(fd, line, (size_t)(n + tail)) < 0) failed = 1;
+    }
+    for (size_t i = 0; !failed && i < member_count; i++) {
+        n = snprintf(line, sizeof line, "VOTE %s %" PRIu64 " %" PRIu64, members[i].peer.id, members[i].incarnation, epochs[i]);
+        int tail = snprintf(line + n, sizeof line - (size_t)n, "|%08" PRIx32 "\n", sale_crc(line, (size_t)n));
+        if (certificate_write(fd, line, (size_t)(n + tail)) < 0) failed = 1;
+    }
+    for (size_t i = 0; !failed && i < count; i++) {
+        n = sale_encode(&records[i], line, sizeof line);
+        if (n < 0 || certificate_write(fd, line, (size_t)n) < 0) failed = 1;
+    }
+    free(records);
+    if (fd >= 0 && control_sync(fd) < 0) failed = 1;
+    if (fd >= 0 && close(fd) < 0) failed = 1;
+    int dir = open(network->config.data_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir < 0) return -1;
+    if (!failed && (renameat(dir, ".close.pending", dir, "close.snapshot") < 0 || control_sync(dir) < 0)) failed = 1;
+    if (close(dir) < 0) failed = 1;
+    if (failed) return -1;
+    checked(pthread_mutex_lock(&network->mutex));
+    char current_scope[SCOPE_SIZE]; size_t current_count;
+    records = closed_cut_locked(network, &current_count, current_scope);
+    int current = records && revision == network->sales_revision && !strcmp(scope, current_scope);
+    free(records);
+    if (current) { network->certified_revision = revision; strcpy(network->certified_scope, scope); }
+    checked(pthread_cond_broadcast(&network->changed));
+    checked(pthread_mutex_unlock(&network->mutex));
+    if (current) {
+        char group[PEERS_MAX * 35] = ""; size_t used = 0;
+        for (size_t i = 0; i < member_count; i++) {
+            int written = snprintf(group + used, sizeof group - used, "%s%s", i ? ", " : "", members[i].peer.id);
+            if (written > 0 && (size_t)written < sizeof group - used) used += (size_t)written;
+        }
+        display_notice("Cierre sincronizado del grupo conectado: %s. Los pendientes con ausentes se conservan.\n", group);
+    }
+    return 0;
+}
+
+void network_prepare_exit(network_runtime *network)
+{
+    checked(pthread_mutex_lock(&network->mutex)); network->exit_prepared = 1;
+    checked(pthread_cond_broadcast(&network->changed)); checked(pthread_mutex_unlock(&network->mutex));
+}
+static int outgoing_complete_locked(network_runtime *network)
+{
+    for (size_t i = 0; i < network->member_count; i++) if (i != network->own && network->online[i])
+        for (size_t j = 0; j < network->count; j++) {
+            shared_route *record = &network->records[j];
+            if (record->applied && !strcmp(record->route.sale.origin, network->config.store_id) &&
+                record->registered_token[i] != network->online_token[i]) return 0;
+        }
+    return 1;
+}
+void network_wait_exit(network_runtime *network)
+{
+    if (!network) return;
+    struct timespec end; clock_gettime(CLOCK_MONOTONIC, &end);
+    uint64_t wait = (uint64_t)network->config.timeout_ms * 2 + network->config.sale_share_delay_ms;
+    if (wait > 60000) wait = 60000;
+    end.tv_sec += (time_t)(wait / 1000); end.tv_nsec += (long)(wait % 1000) * 1000000;
+    if (end.tv_nsec >= 1000000000) { end.tv_sec++; end.tv_nsec -= 1000000000; }
+    checked(pthread_mutex_lock(&network->mutex));
+    int result = 0;
+    while ((!network->exit_prepared || !outgoing_complete_locked(network)) && !result)
+        result = pthread_cond_timedwait(&network->changed, &network->mutex, &end);
+    if (result && result != ETIMEDOUT) checked(result);
+    int complete = network->exit_prepared && outgoing_complete_locked(network);
+    char absent[SCOPE_SIZE] = ""; size_t used = 0;
+    for (size_t i = 0; i < network->member_count; i++) if (i != network->own && !network->online[i]) {
+        int n = snprintf(absent + used, sizeof absent - used, "%s%s", used ? ", " : "", network->view[i].peer.id);
+        if (n > 0 && (size_t)n < sizeof absent - used) used += (size_t)n;
+    }
+    checked(pthread_mutex_unlock(&network->mutex));
+    display_begin("CIERRE: entregas");
+    fprintf(display_output(), "%s\n", complete ? "Ventas propias confirmadas por el grupo conectado." :
+        "Cierre incompleto: quedan entregas pendientes; se conservarán al salir.");
+    if (*absent) fprintf(display_output(), "Recuperación pendiente con: %s.\n", absent);
+    display_end();
+}
+
 static void *network_loop(void *argument)
 {
     network_runtime *network = argument;
     int interval = (int)(network->config.timeout_ms / 2); if (!interval) interval = 1;
     while (!stopping(network)) {
-        dial_peers(network); schedule_controls(network);
+        if (connectivity(network) < 0) { fatal_network(network, "Cambiar conexión"); break; }
+        if (!offline(network)) dial_peers(network);
+        schedule_controls(network); synchronization_tasks(network);
         struct pollfd descriptors[MAX_CONNECTIONS + 2]; uint64_t tokens[MAX_CONNECTIONS];
         descriptors[0] = (struct pollfd){ .fd = network->listener, .events = POLLIN };
         descriptors[1] = (struct pollfd){ .fd = network->wake[0], .events = POLLIN };
@@ -627,6 +1160,7 @@ static void *network_loop(void *argument)
         if (n < 0) { if (errno == EINTR) continue; fatal_network(network, "Esperar red"); break; }
         if (descriptors[1].revents & POLLIN) drain(network->wake[0]);
         if (stopping(network)) break;
+        if (offline(network) != network->offline_active) continue;
         if (descriptors[0].revents & (POLLERR | POLLNVAL)) { fatal_network(network, "Escuchar red"); break; }
         if (descriptors[0].revents & POLLIN) {
             int fd = accept(network->listener, NULL, NULL);
@@ -701,21 +1235,49 @@ void network_status(network_runtime *network)
         }
         ordered[j] = value;
     }
+    fprintf(display_output(), "Red local: %s\n", network->offline_desired ? "DESCONECTADA MANUALMENTE" : "ACTIVADA");
+    char scope[SCOPE_SIZE]; scope_locked(network, scope);
+    size_t cut_count; sale_record *cut = closed_cut_locked(network, &cut_count, scope);
+    int certified = cut && network->certified_revision == network->sales_revision && !strcmp(scope, network->certified_scope);
+    free(cut);
+    fprintf(display_output(), "Cierre de cadena: %s\n", network->frozen_requested ? (certified ? "SINCRONIZADO_CONECTADAS" : "SINCRONIZANDO") : "NO_INICIADO");
+    fputs("Recuperación pendiente con:", display_output());
+    int missing = 0;
+    size_t local_count; sale_record *local = snapshot_locked(network, &local_count, 0);
+    for (size_t i = 0; i < network->member_count; i++) if (i != network->own &&
+        (network->offline_desired || !network->online[i] || !local ||
+         network->cuts[i].token != network->online_token[i] || !equal_cut(&network->cuts[i], local, local_count))) {
+        fprintf(display_output(), " %s", network->view[i].peer.id); missing = 1;
+    }
+    free(local);
+    if (!missing) fputs(" ninguna en la vista comprobada", display_output());
+    fputc('\n', display_output());
     fputs("Orden de incorporación conocido: ", display_output());
     for (size_t i = 0; i < count; i++) fprintf(display_output(), "%s%s", i ? ", " : "", ordered[i].peer.id);
     fputc('\n', display_output());
     checked(pthread_mutex_unlock(&network->mutex));
 }
 
-network_runtime *network_start(const store_config *config, const sales_journal *journal, work_queue *queue, int console_wake)
+network_runtime *network_start(const store_config *config, sales_journal *journal, work_queue *queue, int console_wake)
 {
     network_runtime *network = calloc(1, sizeof *network); if (!network) return NULL;
-    network->listener = network->wake[0] = network->wake[1] = network->book.fd = network->routes.fd = -1;
+    network->listener = network->wake[0] = network->wake[1] = network->book.fd = network->routes.fd = network->state.fd = -1;
     network->config = *config; network->queue = queue; network->console_wake = console_wake;
     for (size_t i = 0; i < MAX_CONNECTIONS; i++) network->connections[i] = (peer_connection){ .fd = -1, .peer = SIZE_MAX };
     for (size_t i = 0; i < PEERS_MAX; i++) network->active[i] = -1;
     int result = pthread_mutex_init(&network->mutex, NULL);
     if (result) { free(network); errno = result; return NULL; }
+    pthread_condattr_t attributes;
+    result = pthread_condattr_init(&attributes);
+    if (result) { pthread_mutex_destroy(&network->mutex); free(network); errno = result; return NULL; }
+    result = pthread_condattr_setclock(&attributes, CLOCK_MONOTONIC);
+    if (!result) result = pthread_cond_init(&network->changed, &attributes);
+    checked(pthread_condattr_destroy(&attributes));
+    if (result) { pthread_mutex_destroy(&network->mutex); free(network); errno = result; return NULL; }
+    network->sales_revision = 1;
+    if (chain_state_open(&network->state, config->data_dir, journal->fresh_history) < 0) goto failure;
+    network->offline_desired = network->offline_active = network->state.offline;
+    network->frozen_requested = network->frozen_durable = network->state.frozen;
     if (membership_open(&network->book, config) < 0 || route_log_open(&network->routes, config->data_dir) < 0) goto failure;
     if (journal->fresh_history && network->routes.count) {
         int dir = open(config->data_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -734,19 +1296,20 @@ network_runtime *network_start(const store_config *config, const sales_journal *
     if (pipe(network->wake) < 0 || nonblocking(network->wake[0]) < 0 || nonblocking(network->wake[1]) < 0) goto failure;
     for (size_t i = 0; i < network->routes.count; i++) {
         sale_route *route = &network->routes.records[i];
-        if (merge_record(network, route, chain_lookup(journal, route->sale.id, NULL), 0) < 0) goto failure;
+        if (!strcmp(route->sale.origin, config->store_id) && !chain_lookup(journal, route->sale.id, NULL)) {
+            if (chain_receive(journal, &route->sale) != 0) goto failure;
+        }
+        sale_record existing;
+        int present = chain_lookup(journal, route->sale.id, &existing);
+        if (present && (existing.amount != route->sale.amount || strcmp(existing.stamp, route->sale.stamp))) goto failure;
+        if (merge_record(network, route, present, 0) < 0) goto failure;
     }
     for (size_t i = 0; i < journal->count; i++) {
         sale_record sale;
         if (chain_record(journal, i, &sale) < 0 || network_publish(network, &sale, 0) < 0) goto failure;
     }
-    network->listener = socket(AF_INET, SOCK_STREAM, 0);
-    if (network->listener < 0 || nonblocking(network->listener) < 0) goto failure;
-    int reuse = 1;
-    if (setsockopt(network->listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse) < 0) goto failure;
-    struct sockaddr_in address = { .sin_family = AF_INET, .sin_port = htons((uint16_t)config->port) };
-    if (inet_pton(AF_INET, config->bind_address, &address.sin_addr) != 1 ||
-        bind(network->listener, (struct sockaddr *)&address, sizeof address) < 0 || listen(network->listener, PEERS_MAX) < 0) goto failure;
+    if (network_maintain(network, journal->total_cent) < 0) goto failure;
+    if (!network->offline_desired && open_listener(network) < 0) goto failure;
     result = pthread_create(&network->thread, NULL, network_loop, network);
     if (result) { errno = result; goto failure; }
     return network;
@@ -755,7 +1318,9 @@ failure:
     if (network->listener >= 0) close(network->listener);
     if (network->wake[0] >= 0) close(network->wake[0]);
     if (network->wake[1] >= 0) close(network->wake[1]);
-    membership_close(&network->book); route_log_close(&network->routes);
+    membership_close(&network->book); route_log_close(&network->routes); chain_state_close(&network->state);
+    for (size_t i = 0; i < PEERS_MAX; i++) free(network->cuts[i].records);
+    checked(pthread_cond_destroy(&network->changed));
     checked(pthread_mutex_destroy(&network->mutex)); free(network->records); free(network->notices); free(network);
     return NULL;
 }
@@ -770,6 +1335,8 @@ void network_destroy(network_runtime *network)
     if (!network) return;
     network_quiesce(network);
     close(network->listener); close(network->wake[0]); close(network->wake[1]);
-    membership_close(&network->book); route_log_close(&network->routes);
+    membership_close(&network->book); route_log_close(&network->routes); chain_state_close(&network->state);
+    for (size_t i = 0; i < PEERS_MAX; i++) free(network->cuts[i].records);
+    checked(pthread_cond_destroy(&network->changed));
     checked(pthread_mutex_destroy(&network->mutex)); free(network->records); free(network->notices); free(network);
 }

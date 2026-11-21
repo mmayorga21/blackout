@@ -281,13 +281,19 @@ int chain_receive(sales_journal *journal, const sale_record *sale)
     return 0;
 }
 
-int chain_local(sales_journal *journal, int64_t amount)
+int chain_prepare(const sales_journal *journal, int64_t amount, sale_record *sale)
 {
     if (journal->own_sequence == UINT64_MAX) { errno = EOVERFLOW; return -1; }
-    sale_record sale = { .amount = amount, .sequence = journal->own_sequence + 1 };
-    strcpy(sale.origin, journal->store_id);
-    snprintf(sale.id, sizeof sale.id, "%s:%s:%" PRIu64, journal->store_id, journal->chain->period, sale.sequence);
-    if (sale_timestamp(sale.stamp, sizeof sale.stamp) < 0) return -1;
+    *sale = (sale_record){ .amount = amount, .sequence = journal->own_sequence + 1 };
+    strcpy(sale->origin, journal->store_id);
+    snprintf(sale->id, sizeof sale->id, "%s:%s:%" PRIu64, journal->store_id, journal->chain->period, sale->sequence);
+    return sale_timestamp(sale->stamp, sizeof sale->stamp);
+}
+
+int chain_local(sales_journal *journal, int64_t amount)
+{
+    sale_record sale;
+    if (chain_prepare(journal, amount, &sale) < 0) return -1;
     return chain_receive(journal, &sale) == 0 ? 0 : -1;
 }
 

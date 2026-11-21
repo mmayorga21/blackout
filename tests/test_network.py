@@ -63,7 +63,7 @@ class RunningStore:
 
 
 def wire(kind, body=b""):
-    return struct.pack("!4sBBHI", b"BLK6", 1, kind, 0, len(body)) + body
+    return struct.pack("!4sBBHI", b"BLK6", 2, kind, 0, len(body)) + body
 
 
 def receive_frame(sock):
@@ -76,7 +76,7 @@ def receive_frame(sock):
             result += part
         return result
     magic, version, kind, reserved, length = struct.unpack("!4sBBHI", exact(12))
-    if magic != b"BLK6" or version != 1 or reserved or length >= 256:
+    if magic != b"BLK6" or version != 2 or reserved or length >= 256:
         raise ValueError("Cabecera inválida")
     return kind, exact(length)
 
@@ -261,24 +261,15 @@ class TwoStores(unittest.TestCase):
             self.assertEqual(store.stop(), 0)
         a, b = self.start("A"), self.start("B")
         self.until(lambda: self.synchronized(2))
-        # La cadena suma 1500, pero ninguna tienda alcanzó su límite propio de 1000.
+        # El límite corresponde al ingreso compartido: ambos quedan en consulta.
         for store in (a, b):
-            latest = self.query(store).rsplit(b"Estado:", 1)[1].splitlines()[0]
-            self.assertIn(b"ABIERTA", latest)
-        a.send("venta 200\n")
-        self.until(lambda: self.synchronized(3))
-        self.assertIn(b"SOLO_CONSULTA", self.query(a).rsplit(b"Estado:", 1)[1].splitlines()[0])
-        self.assertIn(b"ABIERTA", self.query(b).rsplit(b"Estado:", 1)[1].splitlines()[0])
-        b.send("venta 300\n")
-        self.until(lambda: self.synchronized(4))
-        for store in (a, b):
-            self.assertIn(b"Estado: SOLO_CONSULTA", self.query(store))
+            self.assertIn(b"SOLO_CONSULTA", self.query(store).rsplit(b"Estado:", 1)[1].splitlines()[0])
             previous = len(store.errors)
             store.send("venta 1\nhistorial\nayuda\n")
             self.until(lambda: b"Venta rechazada" in store.errors[previous:])
             self.assertIsNone(store.process.poll())
-        self.assertEqual(len(self.rows("A")), 4)
-        self.assertEqual(len(self.rows("B")), 4)
+        self.assertEqual(len(self.rows("A")), 2)
+        self.assertEqual(len(self.rows("B")), 2)
 
     def test_chain_and_limit_mismatch_never_share(self):
         self.configure("B", chain="Y")
@@ -286,43 +277,33 @@ class TwoStores(unittest.TestCase):
         a.send("venta 100\n")
         b.send("venta 200\n")
         self.until(lambda: any(b"Mensaje de red rechazado" in s.errors for s in (a, b)))
-        self.assertEqual(len(self.rows("A")), 1)
-        self.assertEqual(len(self.rows("B")), 1)
+        self.until(lambda: len(self.rows("A")) == 1 and len(self.rows("B")) == 1)
         self.assertIn(b"Ingresos propios: 100", self.query(a))
         self.assertIn(b"Ingresos propios: 200", self.query(b))
 
-    def test_different_local_limits_share_and_stop_independently(self):
+    def test_different_chain_limits_reject_connection(self):
         self.configure("B", limit=200000)
         a, b = self.start("A"), self.start("B")
-        a.send("venta 100000\n")
-        self.until(lambda: self.synchronized(1))
-        self.assertIn(b"SOLO_CONSULTA", self.query(a).rsplit(b"Estado:", 1)[1].splitlines()[0])
-        self.assertIn(b"ABIERTA", self.query(b).rsplit(b"Estado:", 1)[1].splitlines()[0])
-        b.send("venta 200000\n")
-        self.until(lambda: self.synchronized(2))
-        self.assertIn(b"SOLO_CONSULTA", self.query(b).rsplit(b"Estado:", 1)[1].splitlines()[0])
-        self.assertIn(b"Ingresos propios: 100000 | Ingresos conocidos de cadena: 300000", self.query(a))
-        self.assertIn(b"Ingresos propios: 200000 | Ingresos conocidos de cadena: 300000", self.query(b))
-        self.assertIsNone(a.process.poll())
-        self.assertIsNone(b.process.poll())
+        a.send("venta 100\n"); b.send("venta 200\n")
+        self.until(lambda: any("Límite de cadena incompatible".encode() in store.errors for store in (a, b)))
+        self.until(lambda: len(self.rows("A")) == 1 and len(self.rows("B")) == 1)
+        self.assertNotIn("Conexión de cadena establecida".encode(), a.errors + b.errors)
 
-    def test_restart_preserves_independent_limit_after_peer_reaches_its_limit(self):
+    def test_restart_preserves_shared_chain_limit(self):
         for name in "AB":
             self.configure(name, limit=1000)
         a, b = self.start("A"), self.start("B")
         a.send("venta 1000\n")
         self.until(lambda: self.synchronized(1))
-        b.send("venta 400\n")
-        self.until(lambda: self.synchronized(2))
-        self.assertEqual(a.stop(), 0)
-        self.assertEqual(b.stop(), 0)
+        self.assertEqual(a.stop(), 0); self.assertEqual(b.stop(), 0)
         a, b = self.start("A"), self.start("B")
-        self.assertIn(b"SOLO_CONSULTA", self.query(a).rsplit(b"Estado:", 1)[1].splitlines()[0])
-        self.assertIn(b"ABIERTA", self.query(b).rsplit(b"Estado:", 1)[1].splitlines()[0])
-        b.send("venta 600\n")
-        self.until(lambda: self.synchronized(3))
-        self.assertIn(b"SOLO_CONSULTA", self.query(b).rsplit(b"Estado:", 1)[1].splitlines()[0])
-        self.assertIn(b"Ingresos propios: 1000 | Ingresos conocidos de cadena: 2000", self.query(a))
+        for store in (a, b):
+            self.assertIn(b"SOLO_CONSULTA", self.query(store).rsplit(b"Estado:", 1)[1].splitlines()[0])
+            previous = len(store.errors)
+            store.send("venta 1\n")
+            self.until(lambda: b"Venta rechazada" in store.errors[previous:])
+        self.assertEqual(len(self.rows("A")), 1)
+        self.assertEqual(len(self.rows("B")), 1)
 
     def test_fragmented_grouped_duplicate_and_conflicting_sales(self):
         b = self.start("B")
@@ -343,7 +324,7 @@ class TwoStores(unittest.TestCase):
     def test_oversized_message_disconnects_without_stopping_store(self):
         b = self.start("B")
         sock = self.raw_peer()
-        sock.sendall(struct.pack("!4sBBHI", b"BLK6", 1, 2, 0, 1000000))
+        sock.sendall(struct.pack("!4sBBHI", b"BLK6", 2, 2, 0, 1000000))
         self.assertEqual(sock.recv(1), b"")
         self.assertIn(b"Ingresos propios: 0", self.query(b))
         self.assertEqual(self.rows("B"), [])
@@ -390,7 +371,7 @@ class TwoStores(unittest.TestCase):
 
     def test_five_second_default_delay_preserves_local_responsiveness(self):
         for name in "AB":
-            path = self.configure(name, capacity=32, timeout=250)
+            path = self.configure(name, capacity=32, timeout=1000)
             # Omitir la opción comprueba también el valor predeterminado de 5 segundos.
             path.write_text(path.read_text().replace("sale_share_delay_ms=0\n", ""))
         connection_started = time.monotonic()

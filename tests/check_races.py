@@ -87,3 +87,12 @@ for pattern in ("dynamic_discovery", "simultaneous_origins", "skip_unavailable",
                             capture_output=True, text=True, timeout=60)
     check(result)
 print("ThreadSanitizer: descubrimiento, ventas simultáneas, reincorporación, recuperación y bloques de consola sin diagnósticos de carreras.")
+
+for pattern in ("disconnect_local", "shared_limit_control", "group_closes", "offline_state", "orphaned_route", "paged_cut", "complete_inventory"):
+    result = subprocess.run(["python3", "-m", "unittest", "discover", "-s", str(ROOT / "tests"),
+                             "-p", "test_recovery.py", "-k", pattern, "-v"],
+                            env={**ENV, "BLACKOUT_NETWORK_TEST_BINARY": str(ROOT / "build/tsan/blackout"),
+                                 "BLACKOUT_NETWORK_TEST_TSAN": "1"},
+                            capture_output=True, text=True, timeout=60)
+    check(result)
+print("ThreadSanitizer: aislamiento, límite compartido, cierre, reincorporación y conciliación paginada sin diagnósticos de carreras.")

@@ -65,29 +65,45 @@ static void *process_requests(void *argument)
             }
             continue;
         }
+        if (runtime->network && network_maintain(runtime->network, runtime->store->journal.total_cent) < 0) {
+            display_perror("Guardar estado de cadena");
+            runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR); continue;
+        }
+        runtime->store->closing = network_frozen(runtime->network);
         switch (request.kind) {
         case REQUEST_SALE: display_begin("COMANDO: venta %" PRId64, request.amount); break;
         case REQUEST_STATUS: display_begin("COMANDO: estado"); break;
         case REQUEST_HISTORY: display_begin("COMANDO: historial"); break;
         case REQUEST_HELP: display_begin("COMANDO: ayuda"); break;
         case REQUEST_REMOTE: display_begin("AVISO DE RED: venta recibida"); break;
-        case REQUEST_PROGRESS: break;
+        case REQUEST_DISCONNECT: display_begin("COMANDO: desconectar"); break;
+        case REQUEST_CONNECT: display_begin("COMANDO: conectar"); break;
+        case REQUEST_CLOSE: display_begin("COMANDO: cerrar"); break;
+        case REQUEST_SYNC: display_begin("AVISO DE RED: cierre de cadena"); break;
+        case REQUEST_PROGRESS: case REQUEST_CHECKPOINT: case REQUEST_EXIT: break;
         }
         switch (request.kind) {
         case REQUEST_SALE: {
-            int result = store_sell(runtime->store, request.amount);
+            runtime->store->closing = network_frozen(runtime->network);
+            int result;
+            if (runtime->network) {
+                result = store_can_sell(runtime->store, request.amount);
+                if (!result) result = network_local(runtime->network, &runtime->store->journal, request.amount);
+            } else result = store_sell(runtime->store, request.amount);
             if (result < 0) {
+                if (runtime->network) {
+                    display_perror("No se pudo confirmar la venta");
+                    fputs("Se detiene la instancia. Consulta el historial recuperado antes de reintentar la compra.\n", display_errors());
+                    runtime->store->storage_failed = 1;
+                }
                 runtime->worker_result = -1;
                 stop_worker(runtime, QUEUE_ERROR);
             } else if (result == 0) {
-                if (runtime->network) {
-                    sale_record sale;
-                    if (chain_record(&runtime->store->journal, (size_t)runtime->store->journal.count - 1, &sale) < 0 ||
-                        network_publish(runtime->network, &sale, 1) < 0) {
-                        display_perror("Preparar entrega de venta durable");
-                        runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
-                    } else fprintf(display_output(), "Venta aceptada: %s | Importe: %" PRId64 " centavos\n", sale.id, sale.amount);
+                if (network_maintain(runtime->network, runtime->store->journal.total_cent) < 0) {
+                    display_perror("Guardar cierre de cadena");
+                    runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
                 }
+                runtime->store->closing = network_frozen(runtime->network);
                 store_status(runtime->store);
                 if (store_at_limit(runtime->store))
                     fprintf(display_output(), "%s\n", "Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
@@ -106,7 +122,7 @@ static void *process_requests(void *argument)
             }
             break;
         case REQUEST_HELP:
-            fprintf(display_output(), "%s\n", "venta CENTAVOS | estado | historial | ayuda | salir");
+            fprintf(display_output(), "%s\n", "venta CENTAVOS | estado | historial | ayuda | desconectar | conectar | cerrar | salir");
             break;
         case REQUEST_REMOTE: {
             sale_record sale;
@@ -115,6 +131,8 @@ static void *process_requests(void *argument)
             }
             int was_at_limit = store_at_limit(runtime->store);
             int result = network_receive(runtime->network, &request, &runtime->store->journal);
+            if (result >= 0 && network_maintain(runtime->network, runtime->store->journal.total_cent) < 0) result = -1;
+            runtime->store->closing = network_frozen(runtime->network);
             if (result < 0) {
                 display_perror("Guardar venta remota");
                 runtime->store->storage_failed = 1;
@@ -130,6 +148,35 @@ static void *process_requests(void *argument)
             network_reply(runtime->network, &request, sale.id, result);
             break;
         }
+        case REQUEST_DISCONNECT:
+        case REQUEST_CONNECT:
+            if (network_connection(runtime->network, request.kind == REQUEST_CONNECT) < 0) {
+                display_perror("Guardar conexión de cadena");
+                runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
+            }
+            break;
+        case REQUEST_CLOSE:
+            if (runtime->network) {
+                if (network_close_sales(runtime->network) < 0) {
+                    display_perror("Guardar cierre de cadena");
+                    runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
+                }
+                runtime->store->closing = network_frozen(runtime->network);
+                fputs("Cierre de cadena solicitado. Se completarán las ventas aceptadas y la sincronización del grupo conectado.\n", display_output());
+            } else fputs("La tienda independiente termina con salir.\n", display_output());
+            break;
+        case REQUEST_SYNC:
+            fputs("Cierre de cadena recibido: nuevas ventas deshabilitadas; sincronización en curso.\n", display_output());
+            break;
+        case REQUEST_CHECKPOINT:
+            if (network_checkpoint(runtime->network) < 0) {
+                display_perror("Guardar constancia de cierre");
+                runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
+            }
+            break;
+        case REQUEST_EXIT:
+            network_prepare_exit(runtime->network);
+            break;
         case REQUEST_PROGRESS: {
             if (network_advance(runtime->network, &request) < 0) {
                 display_perror("Guardar avance de recorrido");
@@ -158,6 +205,9 @@ static int submit_line(console_runtime *runtime, char *line)
     if (strcmp(command, "estado") == 0) request.kind = REQUEST_STATUS;
     else if (strcmp(command, "historial") == 0) request.kind = REQUEST_HISTORY;
     else if (strcmp(command, "ayuda") == 0) request.kind = REQUEST_HELP;
+    else if (strcmp(command, "desconectar") == 0) request.kind = REQUEST_DISCONNECT;
+    else if (strcmp(command, "conectar") == 0) request.kind = REQUEST_CONNECT;
+    else if (strcmp(command, "cerrar") == 0) request.kind = REQUEST_CLOSE;
     else if (strncmp(command, "venta", 5) == 0 && isspace((unsigned char)command[5])) {
         char *text = command + 5;
         while (isspace((unsigned char)*text)) text++;
@@ -246,13 +296,6 @@ static int receive_commands(console_runtime *runtime)
 
 int console_run(local_store *store)
 {
-    display_begin("ESTADO INICIAL");
-    fprintf(display_output(), "%s\n", "Comandos: venta CENTAVOS | estado | historial | ayuda | salir");
-    store_status(store);
-    if (store_at_limit(store)) {
-        fprintf(display_output(), "%s\n", "Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
-    }
-    display_end();
     console_runtime runtime = { .store = store };
     if (queue_init(&runtime.queue, store->config.queue_capacity) < 0) { display_perror("Crear cola"); return -1; }
     if (pipe(runtime.wake) < 0) { display_perror("Crear notificación"); queue_destroy(&runtime.queue); return -1; }
@@ -267,6 +310,14 @@ int console_run(local_store *store)
             close(runtime.wake[0]); close(runtime.wake[1]); queue_destroy(&runtime.queue); return -1;
         }
     }
+    store->closing = network_frozen(runtime.network);
+    display_begin("ESTADO INICIAL");
+    fprintf(display_output(), "%s\n", "Comandos: venta CENTAVOS | estado | historial | ayuda | desconectar | conectar | cerrar | salir");
+    store_status(store);
+    if (store_at_limit(store)) {
+        fprintf(display_output(), "%s\n", "Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
+    }
+    display_end();
     int result = pthread_create(&worker, NULL, process_requests, &runtime);
     if (result != 0) {
         fprintf(display_errors(), "Crear hilo de procesamiento: %s\n", strerror(result));
@@ -275,6 +326,10 @@ int console_run(local_store *store)
     }
     int reception = receive_commands(&runtime);
     if (reception < 0) queue_stop(&runtime.queue, QUEUE_ERROR);
+    if (runtime.network && reception >= 0 && queue_reason(&runtime.queue) == QUEUE_RUNNING) {
+        work_request finish = { .kind = REQUEST_EXIT };
+        if (!queue_put(&runtime.queue, finish)) network_wait_exit(runtime.network);
+    }
     network_quiesce(runtime.network);
     queue_finish(&runtime.queue);
     result = pthread_join(worker, NULL);
