@@ -1,3 +1,4 @@
+#include "display.h"
 #include "journal.h"
 #include "chain_journal.h"
 
@@ -264,7 +265,7 @@ static int lock_regular(int fd)
     if (!S_ISREG(info.st_mode) || info.st_nlink != 1) { errno = EINVAL; return -1; }
     struct flock lock = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
     if (fcntl(fd, F_SETLK, &lock) < 0) {
-        fputs("No se puede bloquear el historial: otra instancia puede estar usándolo.\n", stderr);
+        fputs("No se puede bloquear el historial: otra instancia puede estar usándolo.\n", display_errors());
         return -1;
     }
     return 0;
@@ -278,14 +279,14 @@ static int migrate_legacy(int source, int target, const store_config *config)
     ssize_t n = read_record(source, data, HEADER_SIZE);
     if (n < 0) return -1;
     if (n != HEADER_SIZE || !verified(data, HEADER_SIZE) || memcmp(expected, data, HEADER_SIZE) != 0) {
-        fputs("Cabecera binaria incompleta, dañada o incompatible; se conserva el original.\n", stderr);
+        fputs("Cabecera binaria incompleta, dañada o incompatible; se conserva el original.\n", display_errors());
         errno = EINVAL; return -1;
     }
     uint64_t count = 0;
     int64_t total = 0;
     while ((n = read_record(source, data, RECORD_SIZE)) > 0) {
         if (n != RECORD_SIZE) {
-            fputs("Migración: registro incompleto final omitido; el respaldo no se modifica.\n", stderr);
+            fputs("Migración: registro incompleto final omitido; el respaldo no se modifica.\n", display_errors());
             break;
         }
         uint64_t sequence = get64(data + 4), amount = get64(data + 12);
@@ -307,7 +308,7 @@ static int load_csv(sales_journal *journal, int64_t limit)
     char line[256], stamp[32];
     size_t length;
     if (csv_line(&reader, line, sizeof line, &length) != 1 || strcmp(line, csv_header) != 0) {
-        fputs("Cabecera CSV incompleta o dañada; no se modifica el historial.\n", stderr);
+        fputs("Cabecera CSV incompleta o dañada; no se modifica el historial.\n", display_errors());
         errno = EINVAL; return -1;
     }
     off_t valid_end = (off_t)length;
@@ -318,7 +319,7 @@ static int load_csv(sales_journal *journal, int64_t limit)
         if (decode_sale(line, journal->store_id, &sequence, stamp, &amount) < 0 ||
             journal->count == UINT64_MAX || sequence != journal->count + 1 ||
             amount > INT64_MAX - journal->total_cent || journal->total_cent >= limit) {
-            fputs("Historial corrupto o secuencia contable inválida; no se descartan registros.\n", stderr);
+            fputs("Historial corrupto o secuencia contable inválida; no se descartan registros.\n", display_errors());
             errno = EINVAL; return -1;
         }
         journal->count = sequence;
@@ -327,7 +328,7 @@ static int load_csv(sales_journal *journal, int64_t limit)
     }
     if (result < 0) return -1;
     if (result == 2) {
-        fputs("Recuperación: se elimina únicamente el último registro incompleto sin salto de línea.\n", stderr);
+        fputs("Recuperación: se elimina únicamente el último registro incompleto sin salto de línea.\n", display_errors());
         if (ftruncate(journal->fd, valid_end) < 0) return -1;
     }
     if (sync_fd(journal->fd) < 0 || lseek(journal->fd, 0, SEEK_END) < 0) return -1;
@@ -339,9 +340,9 @@ int journal_open(sales_journal *journal, const store_config *config)
     if (strcmp(config->chain_id, "none")) return chain_open(journal, config);
     *journal = (sales_journal){ .fd = -1, .metadata_fd = -1, .legacy_fd = -1 };
     strcpy(journal->store_id, config->store_id);
-    if (make_directories(config->data_dir) < 0) { perror("Directorio de datos"); return -1; }
+    if (make_directories(config->data_dir) < 0) { display_perror("Directorio de datos"); return -1; }
     int directory = open(config->data_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (directory < 0) { perror("Abrir directorio de datos"); return -1; }
+    if (directory < 0) { display_perror("Abrir directorio de datos"); return -1; }
     int temporary = -1;
     journal->metadata_fd = openat(directory, "store.meta", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (journal->metadata_fd < 0 || lock_regular(journal->metadata_fd) < 0) goto failure;
@@ -355,7 +356,7 @@ int journal_open(sales_journal *journal, const store_config *config)
     if (metadata_bytes < 0) goto failure;
     if (metadata_bytes != 0 && ((size_t)metadata_bytes != metadata_length ||
                                 memcmp(stored, metadata, metadata_length) != 0)) {
-        fputs("Metadatos incompatibles o dañados: identidad o límite distintos.\n", stderr);
+        fputs("Metadatos incompatibles o dañados: identidad o límite distintos.\n", display_errors());
         errno = EINVAL; goto failure;
     }
     /* Mantener también el bloqueo antiguo mientras se usa su respaldo evita migrar sobre una instancia vieja. */
@@ -365,7 +366,7 @@ int journal_open(sales_journal *journal, const store_config *config)
     journal->fd = openat(directory, "sales.csv", O_RDWR | O_NOFOLLOW | O_CLOEXEC);
     if (journal->fd < 0 && errno != ENOENT) goto failure;
     if (journal->fd >= 0 && metadata_bytes == 0) {
-        fputs("CSV sin metadatos de identidad y límite: se conserva para diagnóstico.\n", stderr);
+        fputs("CSV sin metadatos de identidad y límite: se conserva para diagnóstico.\n", display_errors());
         errno = EINVAL; goto failure;
     }
     if (journal->fd < 0) {
@@ -384,9 +385,9 @@ int journal_open(sales_journal *journal, const store_config *config)
         journal->fd = temporary;
         temporary = -1;
         if (migrate)
-            fputs("Historial convertido a sales.csv; sales.journal se conserva como respaldo sin fechas originales.\n", stderr);
+            fputs("Historial convertido a sales.csv; sales.journal se conserva como respaldo sin fechas originales.\n", display_errors());
         else if (metadata_bytes != 0)
-            fputs("No existe sales.csv: se creó un historial vacío.\n", stderr);
+            fputs("No existe sales.csv: se creó un historial vacío.\n", display_errors());
     }
     if (lock_regular(journal->fd) < 0 || sync_fd(journal->metadata_fd) < 0 || sync_fd(directory) < 0 ||
         load_csv(journal, config->limit_cent) < 0) goto failure;
@@ -394,7 +395,7 @@ int journal_open(sales_journal *journal, const store_config *config)
     return 0;
 
 failure:
-    perror("Abrir registro CSV");
+    display_perror("Abrir registro CSV");
     if (temporary >= 0) close(temporary);
     if (directory >= 0) close(directory);
     if (journal->fd >= 0) close(journal->fd);
@@ -432,7 +433,7 @@ int journal_history(const sales_journal *journal)
     char line[256], stamp[32];
     size_t length;
     if (csv_line(&reader, line, sizeof line, &length) != 1 || strcmp(line, csv_header)) return -1;
-    puts("Identificador | Fecha y hora de registro (zona incluida) | Valor de venta");
+    fprintf(display_output(), "%s\n", "Identificador | Fecha y hora de registro (zona incluida) | Valor de venta");
     uint64_t shown = 0;
     int result;
     while ((result = csv_line(&reader, line, sizeof line, &length)) == 1) {
@@ -440,13 +441,13 @@ int journal_history(const sales_journal *journal)
         int64_t amount;
         if (decode_sale(line, journal->store_id, &sequence, stamp, &amount) < 0 || sequence != shown + 1)
             return -1;
-        printf("%s:%" PRIu64 " | %s | %" PRId64 ".%02" PRId64 "\n",
+        fprintf(display_output(), "%s:%" PRIu64 " | %s | %" PRId64 ".%02" PRId64 "\n",
                journal->store_id, sequence, stamp, amount / 100, amount % 100);
         shown++;
     }
     if (result != 0 || shown != journal->count) return -1;
-    if (shown == 0) puts("Sin ventas registradas.");
-    return ferror(stdout) ? -1 : 0;
+    if (shown == 0) fprintf(display_output(), "%s\n", "Sin ventas registradas.");
+    return ferror(display_output()) ? -1 : 0;
 }
 
 int journal_close(sales_journal *journal)

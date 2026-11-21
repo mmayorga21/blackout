@@ -1,3 +1,4 @@
+#include "display.h"
 #include "network.h"
 #include "chain_journal.h"
 #include "membership.h"
@@ -64,12 +65,12 @@ struct network_runtime {
 
 static void checked(int result)
 {
-    if (result) { fprintf(stderr, "Sincronización de red: %s\n", strerror(result)); exit(EXIT_FAILURE); }
+    if (result) { fprintf(display_errors(), "Sincronización de red: %s\n", strerror(result)); exit(EXIT_FAILURE); }
 }
 static int64_t milliseconds(void)
 {
     struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) { perror("Reloj de red"); exit(EXIT_FAILURE); }
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) { display_perror("Reloj de red"); exit(EXIT_FAILURE); }
     return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 static int nonblocking(int fd)
@@ -82,7 +83,7 @@ void network_notify(network_runtime *network)
     if (!network) return;
     ssize_t n;
     do { n = write(network->wake[1], "x", 1); } while (n < 0 && errno == EINTR);
-    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) { perror("Notificar red"); exit(EXIT_FAILURE); }
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) { display_perror("Notificar red"); exit(EXIT_FAILURE); }
 }
 static void drain(int fd)
 {
@@ -100,7 +101,7 @@ static int stopping(network_runtime *network)
 }
 static void fatal_network(network_runtime *network, const char *message)
 {
-    perror(message); queue_stop(network->queue, QUEUE_ERROR);
+    display_perror(message); queue_stop(network->queue, QUEUE_ERROR);
     ssize_t n;
     do { n = write(network->console_wake, "x", 1); } while (n < 0 && errno == EINTR);
 }
@@ -208,7 +209,7 @@ int network_advance(network_runtime *network, const work_request *request)
         if (route.version == UINT64_MAX) { errno = EOVERFLOW; return -1; }
         route.targets[request->target].state = request->progress; route.version++;
         if (route_log_put(&network->routes, &route) != 0 || merge_record(network, &route, 1, 0) < 0) return -1;
-        fprintf(stderr, request->progress == 'A' ? "Venta %s compartida con %s.\n" :
+        display_notice(request->progress == 'A' ? "Venta %s compartida con %s.\n" :
                         "Venta %s: %s no disponible; se conserva la entrega pendiente.\n",
                 route.sale.id, route.targets[request->target].id);
     }
@@ -248,7 +249,7 @@ static int notice_add(network_runtime *network, const char *id, const char *text
         network->notices = notices; network->notice_capacity = capacity;
     }
     chain_notice *notice = &network->notices[network->notice_count++]; strcpy(notice->id, id); strcpy(notice->text, text);
-    if (show) fprintf(stderr, "Aviso de cadena %s: %s\n", network->config.chain_id, text);
+    if (show) display_notice("Aviso de cadena %s: %s\n", network->config.chain_id, text);
     return 0;
 }
 static void announce_loss(network_runtime *network, size_t peer, const char *reason)
@@ -258,7 +259,7 @@ static void announce_loss(network_runtime *network, size_t peer, const char *rea
     snprintf(id, sizeof id, "%s:%" PRIu64 ":%" PRIu64, network->config.store_id,
              network->book.members[network->book.own].incarnation, network->notice_sequence);
     snprintf(text, sizeof text, "%s perdió su conexión con %s.", network->config.store_id, network->book.members[peer].peer.id);
-    fprintf(stderr, "Se perdió la conexión con la tienda %s en la cadena %s (%s).\n",
+    display_notice("Se perdió la conexión con la tienda %s en la cadena %s (%s).\n",
             network->book.members[peer].peer.id, network->config.chain_id, reason);
     if (notice_add(network, id, text, 0) < 0) fatal_network(network, "Guardar aviso de cadena");
 }
@@ -336,7 +337,7 @@ static int hello(network_runtime *network, size_t slot, const char *body)
     connection->peer = peer; connection->ready = 1; connection->incarnation = member.incarnation;
     network->active[peer] = (int)slot; refresh_view(network);
     network->lost_pending[peer] = 0;
-    if (old < 0) fprintf(stderr, "Conexión de cadena establecida con %s.\n", id);
+    if (old < 0) display_notice("Conexión de cadena establecida con %s.\n", id);
     return 0;
 }
 
@@ -602,7 +603,7 @@ static void *network_loop(void *argument)
             if (connection->fd >= 0) {
                 int result = process_input(network, i);
                 if (result < 0) {
-                    if (result != -2) fputs("Mensaje de red rechazado; se reinicia la conexión.\n", stderr);
+                    if (result != -2) display_notice("Mensaje de red rechazado; se reinicia la conexión.\n");
                     disconnect(network, i, "mensaje inválido", result != -2);
                 } else prepare_output(network, i);
             }
@@ -679,7 +680,7 @@ void network_status(network_runtime *network)
     for (size_t i = 0; i < network->member_count; i++) {
         const chain_member *member = &network->view[i];
         if (i == network->own) {
-            printf("Incorporación propia: %" PRIu64 " | Turno: %" PRIu64 "%s\n", member->incarnation, member->ticket,
+            fprintf(display_output(), "Turno propio: %" PRIu64 "%s\n\n", member->ticket,
                    member->provisional ? " (pendiente de intercambio)" : "");
             continue;
         }
@@ -687,8 +688,8 @@ void network_status(network_runtime *network)
         uint64_t token = network->online_token[i];
         for (size_t j = 0; j < network->count; j++) if (network->records[j].applied &&
             (!token || network->records[j].ack_token[i] != token || network->records[j].ack_version[i] < network->records[j].route.version)) pending++;
-        printf("Par: %s | Red: %s | Entregas sin confirmar en esta conexión: %zu | Incorporación: %" PRIu64 " | Turno: %" PRIu64 "\n",
-               member->peer.id, network->online[i] ? "CONECTADA" : "DESCONECTADA", pending, member->incarnation, member->ticket);
+        fprintf(display_output(), "Par: %s | Red: %s\nEntregas sin confirmar en esta conexión: %zu | Turno: %" PRIu64 "\n\n",
+               member->peer.id, network->online[i] ? "CONECTADA" : "DESCONECTADA", pending, member->ticket);
     }
     chain_member ordered[PEERS_MAX]; size_t count = 0;
     for (size_t i = 0; i < network->member_count; i++) if (network->online[i]) ordered[count++] = network->view[i];
@@ -700,9 +701,9 @@ void network_status(network_runtime *network)
         }
         ordered[j] = value;
     }
-    fputs("Orden de incorporación conocido: ", stdout);
-    for (size_t i = 0; i < count; i++) printf("%s%s", i ? ", " : "", ordered[i].peer.id);
-    putchar('\n');
+    fputs("Orden de incorporación conocido: ", display_output());
+    for (size_t i = 0; i < count; i++) fprintf(display_output(), "%s%s", i ? ", " : "", ordered[i].peer.id);
+    fputc('\n', display_output());
     checked(pthread_mutex_unlock(&network->mutex));
 }
 
@@ -750,7 +751,7 @@ network_runtime *network_start(const store_config *config, const sales_journal *
     if (result) { errno = result; goto failure; }
     return network;
 failure:
-    perror("Iniciar red de tienda");
+    display_perror("Iniciar red de tienda");
     if (network->listener >= 0) close(network->listener);
     if (network->wake[0] >= 0) close(network->wake[0]);
     if (network->wake[1] >= 0) close(network->wake[1]);

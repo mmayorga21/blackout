@@ -50,29 +50,29 @@ class IndependentStore(unittest.TestCase):
     def test_sales_restart_sequence_and_manual_exit(self):
         first = self.run_store("venta 1000\nventa 2500\nsalir\n")
         self.assert_ok(first)
-        self.assertIn("Ventas: 2 | Ingresos: 3500", first.stdout)
+        self.assertIn("Ventas: 2\nIngresos: 3500", first.stdout)
         second = self.run_store("estado\nventa 300\nsalir\n")
         self.assert_ok(second)
         self.assertIn("Venta aceptada: D:3", second.stdout)
-        self.assertIn("Ventas: 3 | Ingresos: 3800", second.stdout)
+        self.assertIn("Ventas: 3\nIngresos: 3800", second.stdout)
 
     def test_invalid_commands_allow_next_sale(self):
         result = self.run_store("venta 0\nventa -1\nventa 1.5\nventa 9223372036854775808\n"
                                 "venta 1 2\nventa\nnoexiste\n" + "a" * 400 + "\nventa 500\n")
         self.assert_ok(result)
         self.assertEqual(result.stdout.count("Venta aceptada:"), 1)
-        self.assertIn("Ventas: 1 | Ingresos: 500", result.stdout)
+        self.assertIn("Ventas: 1\nIngresos: 500", result.stdout)
 
     def test_limit_and_restart_closed(self):
         self.configure(limit=3000)
         result = self.run_store("venta 2500\nventa 1000\nventa 50\n")
         self.assert_ok(result)
         self.assertIn("Estado: SOLO_CONSULTA", result.stdout)
-        self.assertIn("Ventas: 2 | Ingresos: 3500", result.stdout)
+        self.assertIn("Ventas: 2\nIngresos: 3500", result.stdout)
         restart = self.run_store("venta 100\nestado\nhistorial\nayuda\nsalir\n")
         self.assert_ok(restart)
         self.assertNotIn("Venta aceptada:", restart.stdout)
-        self.assertIn("Ventas: 2 | Ingresos: 3500", restart.stdout)
+        self.assertIn("Ventas: 2\nIngresos: 3500", restart.stdout)
         self.assertIn("D:1 |", restart.stdout)
         self.assertIn("D:2 |", restart.stdout)
         self.assertIn("Salida ordenada", restart.stdout)
@@ -88,7 +88,7 @@ class IndependentStore(unittest.TestCase):
         self.configure(limit=9223372036854775807)
         result = self.run_store("venta 9223372036854775806\nventa 2\nventa 1\n")
         self.assert_ok(result)
-        self.assertIn("Ventas: 2 | Ingresos: 9223372036854775807", result.stdout)
+        self.assertIn("Ventas: 2\nIngresos: 9223372036854775807", result.stdout)
         self.assertIn("Venta rechazada", result.stderr)
 
     def test_exclusive_process_lock_and_release_after_kill(self):
@@ -192,7 +192,7 @@ class IndependentStore(unittest.TestCase):
                 self.assert_ok(result)
         restart = self.run_store()
         self.assert_ok(restart)
-        self.assertIn("Ventas: 2 | Ingresos: 700", restart.stdout)
+        self.assertIn("Ventas: 2\nIngresos: 700", restart.stdout)
 
     def test_chain_configuration_not_silently_treated_as_independent(self):
         self.configure(chain="X")
@@ -277,7 +277,7 @@ class IndependentStore(unittest.TestCase):
         self.assertEqual(original, legacy.read_bytes())
         restart = self.run_store()
         self.assert_ok(restart)
-        self.assertIn("Ventas: 3 | Ingresos: 3550", restart.stdout)
+        self.assertIn("Ventas: 3\nIngresos: 3550", restart.stdout)
         self.assertNotIn("convertido", restart.stderr)
 
     def test_corrupted_legacy_does_not_publish_csv(self):
@@ -308,7 +308,7 @@ class IndependentStore(unittest.TestCase):
         result = self.run_store()
         self.assert_ok(result)
         self.assertIn("se creó un historial vacío", result.stderr)
-        self.assertIn("Ventas: 0 | Ingresos: 0", result.stdout)
+        self.assertIn("Ventas: 0\nIngresos: 0", result.stdout)
         self.assertEqual(original, legacy.read_bytes())
         with self.journal.open() as file:
             self.assertEqual(list(csv.DictReader(file)), [])
@@ -327,7 +327,7 @@ class IndependentStore(unittest.TestCase):
         restart = self.run_store("venta 50\n")
         self.assert_ok(restart)
         self.assertIn("Venta aceptada: D:2", restart.stdout)
-        self.assertIn("Ventas: 2 | Ingresos: 300", restart.stdout)
+        self.assertIn("Ventas: 2\nIngresos: 300", restart.stdout)
 
     def test_deleted_csv_resets_previously_closed_store(self):
         self.configure(limit=100)
@@ -336,7 +336,7 @@ class IndependentStore(unittest.TestCase):
         result = self.run_store("venta 25\n")
         self.assert_ok(result)
         self.assertIn("Estado: ABIERTA", result.stdout)
-        self.assertIn("Ventas: 1 | Ingresos: 25", result.stdout)
+        self.assertIn("Ventas: 1\nIngresos: 25", result.stdout)
 
 
 if __name__ == "__main__":

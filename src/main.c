@@ -1,3 +1,4 @@
+#include "display.h"
 #include "config.h"
 #include "console.h"
 
@@ -31,13 +32,21 @@ int main(int argc, char **argv)
             while ((c = getchar()) != '\n' && c != EOF) { }
         }
     }
-    printf("Configuración válida: tienda %s, cadena %s, dirección %s:%u.\n",
+    display_begin("INICIO");
+    fprintf(display_output(), "Configuración válida: tienda %s, cadena %s, dirección %s:%u.\n",
            config.store_id, config.chain_id, config.bind_address, config.port);
-    printf("Límite: %" PRId64 " centavos; datos: %s.\n", config.limit_cent, config.data_dir);
+    fprintf(display_output(), "Límite: %" PRId64 " centavos; datos: %s.\n", config.limit_cent, config.data_dir);
     local_store store;
-    if (store_open(&store, &config) < 0) return EXIT_FAILURE;
-    int result = argc == 4 ? journal_history(&store.journal) : console_run(&store);
-    if (result < 0 && argc == 4) fputs("No se pudo leer el historial.\n", stderr);
+    int opened = store_open(&store, &config);
+    display_end();
+    if (opened < 0) return EXIT_FAILURE;
+    int result;
+    if (argc == 4) {
+        display_begin("CONSULTA: historial");
+        result = journal_history(&store.journal);
+        if (result < 0) fputs("No se pudo leer el historial.\n", display_errors());
+        display_end();
+    } else result = console_run(&store);
     if (store_close(&store) < 0) result = -1;
     return result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -79,11 +79,11 @@ for pattern in ("simultaneous", "offline_sales", "remote_limit", "short_share"):
     check(result)
 print("ThreadSanitizer: ventas simultáneas, reconexión, límite y espera de envío sin diagnósticos de carreras.")
 
-for pattern in ("dynamic_discovery", "simultaneous_origins", "skip_unavailable", "recovery_cannot"):
+for pattern in ("dynamic_discovery", "simultaneous_origins", "skip_unavailable", "recovery_cannot", "console_blocks"):
     result = subprocess.run(["python3", "-m", "unittest", "discover", "-s", str(ROOT / "tests"),
                              "-p", "test_multi_store.py", "-k", pattern, "-v"],
                             env={**ENV, "BLACKOUT_NETWORK_TEST_BINARY": str(ROOT / "build/tsan/blackout"),
                                  "BLACKOUT_NETWORK_TEST_TSAN": "1"},
                             capture_output=True, text=True, timeout=60)
     check(result)
-print("ThreadSanitizer: descubrimiento, ventas simultáneas, reincorporación y turnos de recuperación sin diagnósticos de carreras.")
+print("ThreadSanitizer: descubrimiento, ventas simultáneas, reincorporación, recuperación y bloques de consola sin diagnósticos de carreras.")

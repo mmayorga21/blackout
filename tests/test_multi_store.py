@@ -171,7 +171,7 @@ class MultipleStores(unittest.TestCase):
         previous = store.output.count(marker)
         store.send("estado\n")
         self.until(lambda: store.output.count(marker) > previous)
-        return store.output.rsplit(b"Estado:", 1)[1]
+        return store.output.rsplit(b"Estado:", 1)[1].split(b"========================================", 1)[0]
 
     def settle(self, names="ABC", expected=None):
         required = len(names) - 1 if expected is None else expected
@@ -348,6 +348,56 @@ class MultipleStores(unittest.TestCase):
                 self.assertIn(b"Iniciar red de tienda", result.stderr)
                 self.assertEqual(path.read_bytes(), damaged)
                 self.assertEqual(len(self.rows(name)), 1)
+
+    def test_console_blocks_remain_whole_with_concurrent_network_notices(self):
+        # stdout y stderr comparten destino, como en una terminal real.
+        processes = []
+        paths = []
+        files = []
+        try:
+            for name in "ABC":
+                path = self.folder / f"{name}.terminal"
+                output = path.open("wb")
+                files.append(output); paths.append(path)
+                process = subprocess.Popen(PREFIX + [str(BINARY), "--config", str(self.folder / f"{name}.conf")],
+                                           stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT)
+                processes.append(process)
+            self.until(lambda: all(path.read_bytes().count("Conexión de cadena establecida".encode()) >= 2 for path in paths))
+            for process in processes:
+                process.stdin.write(b"venta 10\nestado\nhistorial\nayuda\n" * 5)
+                process.stdin.flush()
+            self.until(lambda: self.equal("ABC", 15))
+            for process in processes:
+                process.stdin.write(b"salir\n"); process.stdin.flush()
+            for process in processes:
+                self.assertEqual(process.wait(timeout=10), 0)
+            for path in paths:
+                content = path.read_bytes()
+                self.assertNotIn("Incorporación".encode(), content)
+                self.assertIn(b"COMANDO: historial", content)
+                self.assertIn(b"AVISO DE RED", content)
+                closing = None
+                blocks = 0
+                for line in content.splitlines():
+                    if not line:
+                        continue
+                    if line.startswith((b"========== ", b"---------- ")):
+                        self.assertIsNone(closing, f"Bloques entremezclados: {line!r}")
+                        closing = b"========================================" if line.startswith(b"=") else b"----------------------------------------"
+                        blocks += 1
+                    elif line == closing:
+                        closing = None
+                    else:
+                        self.assertIsNotNone(closing, f"Salida fuera de bloque: {line!r}")
+                self.assertIsNone(closing)
+                self.assertGreaterEqual(blocks, 23)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill(); process.wait(timeout=5)
+                process.stdin.close()
+            for output in files:
+                output.close()
 
 
 if __name__ == "__main__":

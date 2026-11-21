@@ -1,3 +1,4 @@
+#include "display.h"
 #include "console.h"
 #include "work_queue.h"
 #include "chain_journal.h"
@@ -38,7 +39,7 @@ static void wake_receiver(console_runtime *runtime)
     ssize_t n;
     do { n = write(runtime->wake[1], "x", 1); } while (n < 0 && errno == EINTR);
     if (n != 1) {
-        perror("Notificar cierre de consola");
+        display_perror("Notificar cierre de consola");
         exit(EXIT_FAILURE);
     }
 }
@@ -57,9 +58,20 @@ static void *process_requests(void *argument)
     while (queue_take(&runtime->queue, &request, &reason) == 0) {
         network_notify(runtime->network);
         if (reason == QUEUE_ERROR) {
-            if (request.kind == REQUEST_SALE)
-                fputs("Venta rechazada: solicitud pendiente no aceptada por fallo de la instancia.\n", stderr);
+            if (request.kind == REQUEST_SALE) {
+                display_begin("COMANDO: venta %" PRId64, request.amount);
+                fputs("Venta rechazada: solicitud pendiente no aceptada por fallo de la instancia.\n", display_errors());
+                display_end();
+            }
             continue;
+        }
+        switch (request.kind) {
+        case REQUEST_SALE: display_begin("COMANDO: venta %" PRId64, request.amount); break;
+        case REQUEST_STATUS: display_begin("COMANDO: estado"); break;
+        case REQUEST_HISTORY: display_begin("COMANDO: historial"); break;
+        case REQUEST_HELP: display_begin("COMANDO: ayuda"); break;
+        case REQUEST_REMOTE: display_begin("AVISO DE RED: venta recibida"); break;
+        case REQUEST_PROGRESS: break;
         }
         switch (request.kind) {
         case REQUEST_SALE: {
@@ -72,13 +84,13 @@ static void *process_requests(void *argument)
                     sale_record sale;
                     if (chain_record(&runtime->store->journal, (size_t)runtime->store->journal.count - 1, &sale) < 0 ||
                         network_publish(runtime->network, &sale, 1) < 0) {
-                        perror("Preparar entrega de venta durable");
+                        display_perror("Preparar entrega de venta durable");
                         runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
-                    } else printf("Venta aceptada: %s | Importe: %" PRId64 " centavos\n", sale.id, sale.amount);
+                    } else fprintf(display_output(), "Venta aceptada: %s | Importe: %" PRId64 " centavos\n", sale.id, sale.amount);
                 }
                 store_status(runtime->store);
                 if (store_at_limit(runtime->store))
-                    puts("Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
+                    fprintf(display_output(), "%s\n", "Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
             }
             break;
         }
@@ -88,13 +100,13 @@ static void *process_requests(void *argument)
             break;
         case REQUEST_HISTORY:
             if (journal_history(&runtime->store->journal) < 0) {
-                fputs("No se pudo leer un historial íntegro; se detiene la instancia.\n", stderr);
+                fputs("No se pudo leer un historial íntegro; se detiene la instancia.\n", display_errors());
                 runtime->worker_result = -1;
                 stop_worker(runtime, QUEUE_ERROR);
             }
             break;
         case REQUEST_HELP:
-            puts("venta CENTAVOS | estado | historial | ayuda | salir");
+            fprintf(display_output(), "%s\n", "venta CENTAVOS | estado | historial | ayuda | salir");
             break;
         case REQUEST_REMOTE: {
             sale_record sale;
@@ -104,28 +116,29 @@ static void *process_requests(void *argument)
             int was_at_limit = store_at_limit(runtime->store);
             int result = network_receive(runtime->network, &request, &runtime->store->journal);
             if (result < 0) {
-                perror("Guardar venta remota");
+                display_perror("Guardar venta remota");
                 runtime->store->storage_failed = 1;
                 runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
                 break;
             }
             if (result == 0) {
-                printf("Venta remota registrada: %s\n", sale.id);
+                fprintf(display_output(), "Venta remota registrada: %s\n", sale.id);
                 store_status(runtime->store);
                 if (!was_at_limit && store_at_limit(runtime->store))
-                    puts("Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
-            } else if (result == 2) fputs("Venta remota rechazada: ID en conflicto, origen o importe inválidos.\n", stderr);
+                    fprintf(display_output(), "%s\n", "Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
+            } else if (result == 2) fputs("Venta remota rechazada: ID en conflicto, origen o importe inválidos.\n", display_errors());
             network_reply(runtime->network, &request, sale.id, result);
             break;
         }
         case REQUEST_PROGRESS: {
             if (network_advance(runtime->network, &request) < 0) {
-                perror("Guardar avance de recorrido");
+                display_perror("Guardar avance de recorrido");
                 runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
             }
             break;
         }
         }
+        display_end();
     }
     reason = queue_reason(&runtime->queue);
     if (reason == QUEUE_ERROR) runtime->worker_result = -1;
@@ -149,20 +162,34 @@ static int submit_line(console_runtime *runtime, char *line)
         char *text = command + 5;
         while (isspace((unsigned char)*text)) text++;
         if (parse_amount(text, &request.amount) < 0) {
-            fputs("Importe inválido: usa centavos enteros positivos dentro del rango de 64 bits.\n", stderr);
+            display_begin("COMANDO: %s", command);
+            fputs("Importe inválido: usa centavos enteros positivos dentro del rango de 64 bits.\n", display_errors());
+            display_end();
             return 0;
         }
         request.kind = REQUEST_SALE;
     } else {
-        fputs("Comando inválido. Usa ayuda.\n", stderr);
+        display_begin("COMANDO: %s", command);
+        fputs("Comando inválido. Usa ayuda.\n", display_errors());
+        display_end();
         return 0;
     }
     if (queue_put(&runtime->queue, request) != 0) {
-        if (request.kind == REQUEST_SALE)
-            fputs("Venta rechazada: recepción detenida; la solicitud no fue aceptada.\n", stderr);
+        if (request.kind == REQUEST_SALE) {
+            display_begin("COMANDO: venta %" PRId64, request.amount);
+            fputs("Venta rechazada: recepción detenida; la solicitud no fue aceptada.\n", display_errors());
+            display_end();
+        }
         return 2;
     }
     return 0;
+}
+
+static void invalid_line(void)
+{
+    display_begin("COMANDO: entrada inválida");
+    fputs("Comando demasiado largo o con bytes inválidos.\n", display_errors());
+    display_end();
 }
 
 /* -1: fallo; 0: EOF; 1: salir; 2: notificación de cierre. */
@@ -176,22 +203,22 @@ static int receive_commands(console_runtime *runtime)
     size_t used = 0;
     int invalid = 0;
     int interactive = isatty(STDIN_FILENO);
-    if (interactive) { fputs("blackout> ", stdout); fflush(stdout); }
+    if (interactive) display_prompt();
     for (;;) {
         int ready;
         do { ready = poll(watched, 2, -1); } while (ready < 0 && errno == EINTR);
-        if (ready < 0) { perror("Esperar entrada"); return -1; }
+        if (ready < 0) { display_perror("Esperar entrada"); return -1; }
         if (watched[1].revents & (POLLIN | POLLHUP)) return 2;
         if (watched[0].revents & (POLLERR | POLLNVAL) || watched[1].revents & (POLLERR | POLLNVAL)) {
-            fputs("Error en los descriptores de recepción.\n", stderr);
+            fputs("Error en los descriptores de recepción.\n", display_errors());
             return -1;
         }
         if (!(watched[0].revents & (POLLIN | POLLHUP))) continue;
         ssize_t n;
         do { n = read(STDIN_FILENO, chunk, sizeof chunk); } while (n < 0 && errno == EINTR);
-        if (n < 0) { perror("Leer comandos"); return -1; }
+        if (n < 0) { display_perror("Leer comandos"); return -1; }
         if (n == 0) {
-            if (invalid) fputs("Comando demasiado largo o con bytes inválidos.\n", stderr);
+            if (invalid) invalid_line();
             else if (used) {
                 line[used] = '\0';
                 int result = submit_line(runtime, line);
@@ -202,7 +229,7 @@ static int receive_commands(console_runtime *runtime)
         for (size_t i = 0; i < (size_t)n; i++) {
             if (chunk[i] == '\n') {
                 int result = 0;
-                if (invalid) fputs("Comando demasiado largo o con bytes inválidos.\n", stderr);
+                if (invalid) invalid_line();
                 else {
                     line[used] = '\0';
                     result = submit_line(runtime, line);
@@ -210,7 +237,7 @@ static int receive_commands(console_runtime *runtime)
                 used = 0;
                 invalid = 0;
                 if (result != 0) return result;
-                if (interactive) { fputs("blackout> ", stdout); fflush(stdout); }
+                if (interactive) display_prompt();
             } else if (chunk[i] == '\0' || used == sizeof line - 1) invalid = 1;
             else if (!invalid) line[used++] = chunk[i];
         }
@@ -219,16 +246,18 @@ static int receive_commands(console_runtime *runtime)
 
 int console_run(local_store *store)
 {
-    puts("Comandos: venta CENTAVOS | estado | historial | ayuda | salir");
+    display_begin("ESTADO INICIAL");
+    fprintf(display_output(), "%s\n", "Comandos: venta CENTAVOS | estado | historial | ayuda | salir");
     store_status(store);
     if (store_at_limit(store)) {
-        puts("Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
+        fprintf(display_output(), "%s\n", "Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
     }
+    display_end();
     console_runtime runtime = { .store = store };
-    if (queue_init(&runtime.queue, store->config.queue_capacity) < 0) { perror("Crear cola"); return -1; }
-    if (pipe(runtime.wake) < 0) { perror("Crear notificación"); queue_destroy(&runtime.queue); return -1; }
+    if (queue_init(&runtime.queue, store->config.queue_capacity) < 0) { display_perror("Crear cola"); return -1; }
+    if (pipe(runtime.wake) < 0) { display_perror("Crear notificación"); queue_destroy(&runtime.queue); return -1; }
     if (fcntl(runtime.wake[0], F_SETFD, FD_CLOEXEC) < 0 || fcntl(runtime.wake[1], F_SETFD, FD_CLOEXEC) < 0) {
-        perror("Configurar notificación");
+        display_perror("Configurar notificación");
         close(runtime.wake[0]); close(runtime.wake[1]); queue_destroy(&runtime.queue); return -1;
     }
     pthread_t worker;
@@ -240,7 +269,7 @@ int console_run(local_store *store)
     }
     int result = pthread_create(&worker, NULL, process_requests, &runtime);
     if (result != 0) {
-        fprintf(stderr, "Crear hilo de procesamiento: %s\n", strerror(result));
+        fprintf(display_errors(), "Crear hilo de procesamiento: %s\n", strerror(result));
         network_destroy(runtime.network);
         close(runtime.wake[0]); close(runtime.wake[1]); queue_destroy(&runtime.queue); return -1;
     }
@@ -250,16 +279,19 @@ int console_run(local_store *store)
     queue_finish(&runtime.queue);
     result = pthread_join(worker, NULL);
     if (result != 0) {
-        fprintf(stderr, "Esperar al trabajador: %s\n", strerror(result));
+        fprintf(display_errors(), "Esperar al trabajador: %s\n", strerror(result));
         /* No cerrar el historial ni destruir la cola si el hilo pudiera seguir usándolos. */
         exit(EXIT_FAILURE);
     }
     queue_stop_reason reason = queue_reason(&runtime.queue);
     int failed = runtime.worker_result < 0 || reception < 0;
-    if (reason == QUEUE_RUNNING)
-        puts(reception == 1 ? "Salida ordenada; historial conservado." : "Fin de entrada: salida ordenada.");
-    if (close(runtime.wake[0]) < 0) { perror("Cerrar notificación"); failed = 1; }
-    if (close(runtime.wake[1]) < 0) { perror("Cerrar notificación"); failed = 1; }
+    if (reason == QUEUE_RUNNING) {
+        display_begin(reception == 1 ? "COMANDO: salir" : "CIERRE");
+        fprintf(display_output(), "%s\n", reception == 1 ? "Salida ordenada; historial conservado." : "Fin de entrada: salida ordenada.");
+        display_end();
+    }
+    if (close(runtime.wake[0]) < 0) { display_perror("Cerrar notificación"); failed = 1; }
+    if (close(runtime.wake[1]) < 0) { display_perror("Cerrar notificación"); failed = 1; }
     network_destroy(runtime.network);
     queue_destroy(&runtime.queue);
     return failed ? -1 : 0;

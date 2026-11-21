@@ -1,3 +1,4 @@
+#include "display.h"
 #include "chain_journal.h"
 #include "peers.h"
 
@@ -153,7 +154,7 @@ static int load(sales_journal *journal)
     while (!failed && fgets(line, sizeof line, file)) {
         if (!strchr(line, '\n')) {
             if (!feof(file)) { failed = 1; break; }
-            fputs("Recuperación: último registro incompleto de cadena eliminado.\n", stderr);
+            fputs("Recuperación: último registro incompleto de cadena eliminado.\n", display_errors());
             if (ftruncate(journal->fd, valid_end) < 0) failed = 1;
             break;
         }
@@ -165,7 +166,7 @@ static int load(sales_journal *journal)
     }
     if (ferror(file)) failed = 1;
     if (fclose(file)) failed = 1;
-    if (failed) { fputs("Historial de cadena inválido; no se abre la tienda.\n", stderr); errno = EINVAL; return -1; }
+    if (failed) { fputs("Historial de cadena inválido; no se abre la tienda.\n", display_errors()); errno = EINVAL; return -1; }
     return durable(journal->fd) < 0 || lseek(journal->fd, 0, SEEK_END) < 0 ? -1 : 0;
 }
 
@@ -225,7 +226,7 @@ int chain_open(sales_journal *journal, const store_config *config)
     journal->metadata_fd = openat(directory, "store.meta", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (journal->metadata_fd < 0 || regular(journal->metadata_fd) < 0) goto failure;
     struct flock lock = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
-    if (fcntl(journal->metadata_fd, F_SETLK, &lock) < 0) { fputs("Otra instancia usa la tienda.\n", stderr); goto failure; }
+    if (fcntl(journal->metadata_fd, F_SETLK, &lock) < 0) { fputs("Otra instancia usa la tienda.\n", display_errors()); goto failure; }
     char metadata[200], stored[200];
     int prefix = snprintf(metadata, sizeof metadata, "BLACKOUT_CHAIN_V1,%s,%s,%" PRId64,
                           config->store_id, config->chain_id, config->limit_cent);
@@ -236,7 +237,7 @@ int chain_open(sales_journal *journal, const store_config *config)
     do { n = read(journal->metadata_fd, stored, sizeof stored); } while (n < 0 && errno == EINTR);
     if (n < 0) goto failure;
     if (n && ((size_t)n != length || memcmp(metadata, stored, length))) {
-        fputs("Metadatos incompatibles: identidad, cadena o límite distintos.\n", stderr); errno = EINVAL; goto failure;
+        fputs("Metadatos incompatibles: identidad, cadena o límite distintos.\n", display_errors()); errno = EINVAL; goto failure;
     }
     journal->fd = openat(directory, "sales.csv", O_RDWR | O_NOFOLLOW | O_CLOEXEC);
     if (journal->fd < 0 && errno != ENOENT) goto failure;
@@ -257,7 +258,7 @@ int chain_open(sales_journal *journal, const store_config *config)
     if (close(directory) < 0) { directory = -1; goto failure; }
     return 0;
 failure:
-    perror("Abrir historial de cadena");
+    display_perror("Abrir historial de cadena");
     if (directory >= 0) close(directory);
     if (temporary >= 0) close(temporary);
     chain_close(journal);
@@ -306,13 +307,13 @@ int chain_lookup(const sales_journal *journal, const char *id, sale_record *sale
 
 int chain_history(const sales_journal *journal)
 {
-    puts("Identificador | Fecha y hora de registro (zona incluida) | Valor de venta");
+    fprintf(display_output(), "%s\n", "Identificador | Fecha y hora de registro (zona incluida) | Valor de venta");
     for (size_t i = 0; i < journal->count; i++) {
         const sale_record *sale = &journal->chain->records[i];
-        printf("%s | %s | %" PRId64 ".%02" PRId64 "\n", sale->id, sale->stamp, sale->amount / 100, sale->amount % 100);
+        fprintf(display_output(), "%s | %s | %" PRId64 ".%02" PRId64 "\n", sale->id, sale->stamp, sale->amount / 100, sale->amount % 100);
     }
-    if (!journal->count) puts("Sin ventas registradas.");
-    return ferror(stdout) ? -1 : 0;
+    if (!journal->count) fprintf(display_output(), "%s\n", "Sin ventas registradas.");
+    return ferror(display_output()) ? -1 : 0;
 }
 
 int chain_close(sales_journal *journal)

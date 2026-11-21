@@ -75,16 +75,16 @@ class ConcurrentStore(unittest.TestCase):
         self.assertEqual([r["identificador"] for r in rows], [f"D:{i}" for i in range(1, 102)])
         self.assertEqual(rows[-1]["valor_venta"], "0.02")
         before, after = result.stdout.split("Identificador | Fecha y hora", 1)
-        self.assertIn("Ventas: 100 | Ingresos: 100", before)
+        self.assertIn("Ventas: 100\nIngresos: 100", before)
         self.assertIn("D:100 |", after)
         self.assertLess(after.index("D:100 |"), after.index("Venta aceptada: D:101"))
-        self.assertIn("Ventas: 101 | Ingresos: 102", after)
+        self.assertIn("Ventas: 101\nIngresos: 102", after)
 
     def test_eof_drains_queue_and_handles_last_line_without_newline(self):
         result = self.run_store("venta 3\n" * 50 + "venta 7")
         self.assert_ok(result)
         self.assertEqual(len(self.rows()), 51)
-        self.assertIn("Ventas: 51 | Ingresos: 157", result.stdout)
+        self.assertIn("Ventas: 51\nIngresos: 157", result.stdout)
         self.assertIn("Fin de entrada", result.stdout)
 
     def read_until(self, process, marker):
@@ -168,7 +168,7 @@ class ConcurrentStore(unittest.TestCase):
                                 capture_output=True, env=env, timeout=10)
         self.assert_ok(result)
         self.assertEqual(len(self.rows()), 30)
-        self.assertIn("Ventas: 30 | Ingresos: 30", result.stdout)
+        self.assertIn("Ventas: 30\nIngresos: 30", result.stdout)
 
     def test_idle_two_threads_without_busy_waiting(self):
         process = self.start()
