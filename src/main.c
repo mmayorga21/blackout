@@ -2,6 +2,8 @@
 #include "config.h"
 #include "console.h"
 #include "government.h"
+#include "input.h"
+#include "peers.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -24,15 +26,14 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     store_config config;
-    while (config_load(argv[2], &config, stderr) != 0) {
-        char reply[32];
-        fputs("Corrige el archivo y pulsa Enter para reintentar; q para salir: ", stderr);
-        if (fgets(reply, sizeof reply, stdin) == NULL || reply[0] == 'q' || reply[0] == 'Q')
-            return EXIT_FAILURE;
-        if (strchr(reply, '\n') == NULL) {
-            int c;
-            while ((c = getchar()) != '\n' && c != EOF) { }
+    int configured = 0;
+    while (!configured) {
+        configured = config_load(argv[2], &config, stderr) == 0;
+        if (configured && strcmp(config.chain_id, "none")) {
+            peer_catalog catalog;
+            configured = peers_load(&config, &catalog) == 0;
         }
+        if (!configured && !input_retry_configuration()) return EXIT_FAILURE;
     }
     display_begin("INICIO");
     fprintf(display_output(), "Configuración válida: tienda %s, cadena %s, dirección %s:%u.\n",

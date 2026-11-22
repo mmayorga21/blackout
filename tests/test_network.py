@@ -186,6 +186,19 @@ class TwoStores(unittest.TestCase):
         self.addCleanup(sock.close)
         return sock
 
+    def assert_protocol_disconnect(self, sock):
+        # Puede haber un latido ya enviado antes de recibir la entrada inválida.
+        # No debe aparecer ACK ni otro dato, y la conexión debe cerrarse en plazo.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            sock.settimeout(max(.001, deadline - time.monotonic()))
+            try:
+                kind, body = receive_frame(sock)
+            except EOFError:
+                return
+            self.assertEqual((kind, body), (4, b""))
+        self.fail("El par no cerró la conexión tras una entrada inválida")
+
     def responses(self, sock, expected_kind, count=1):
         results = []
         while len(results) < count:
@@ -325,7 +338,7 @@ class TwoStores(unittest.TestCase):
         b = self.start("B")
         sock = self.raw_peer()
         sock.sendall(struct.pack("!4sBBHI", b"BLK6", 2, 2, 0, 1000000))
-        self.assertEqual(sock.recv(1), b"")
+        self.assert_protocol_disconnect(sock)
         self.assertIn(b"Ingresos propios: 0", self.query(b))
         self.assertEqual(self.rows("B"), [])
 
@@ -335,7 +348,7 @@ class TwoStores(unittest.TestCase):
             with self.subTest(body=body):
                 sock = self.raw_peer()
                 sock.sendall(wire(2, body))
-                self.assertEqual(sock.recv(1), b"")
+                self.assert_protocol_disconnect(sock)
                 sock.close()
                 self.assertEqual(self.rows("B"), [])
                 self.assertIsNone(b.process.poll())

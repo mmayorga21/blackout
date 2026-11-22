@@ -1,4 +1,5 @@
 #include "government.h"
+#include "input.h"
 #include "query_wire.h"
 #include "sale.h"
 #include "display.h"
@@ -48,8 +49,10 @@ static int collect(const government_config *config, size_t target, government_re
         if (connected < 0 && errno != EINPROGRESS) { finish(attempt, result, errno); continue; }
         attempt->connecting = connected < 0;
     }
-    for (;;) {
-        struct pollfd descriptors[GOVERNMENT_STORES]; int active = 0;
+    int active = 1;
+    while (active) {
+        active = 0;
+        struct pollfd descriptors[GOVERNMENT_STORES];
         for (size_t i = 0; i < config->count; i++) {
             government_attempt *attempt = &attempts[i];
             descriptors[i] = (struct pollfd){ .fd = attempt->fd, .events = 0 };
@@ -121,22 +124,6 @@ static int collect(const government_config *config, size_t target, government_re
     }
     free(attempts); return 0;
 }
-/* 0 fin; 1 línea válida; 2 línea descartada; -1 error. */
-static int read_command(char *line, size_t capacity)
-{
-    size_t used = 0; int invalid = 0;
-    for (;;) {
-        int c = getchar();
-        if (c == EOF) {
-            if (ferror(stdin)) return -1;
-            if (!used && !invalid) return 0;
-            line[used] = '\0'; return invalid ? 2 : 1;
-        }
-        if (c == '\n') { line[used] = '\0'; return invalid ? 2 : 1; }
-        if (!c || used == capacity - 1) invalid = 1;
-        else if (!invalid) line[used++] = (char)c;
-    }
-}
 static int execute(const government_config *config, government_cache *cache, size_t target)
 {
     government_result *results = calloc(config->count, sizeof *results); if (!results) return -1;
@@ -177,7 +164,16 @@ int government_run(const char *path)
     government_cache *cache = calloc(1, sizeof *cache);
     if (!config || !cache) { free(config); free(cache); return EXIT_FAILURE; }
     display_begin("INICIO DEL CONSULTOR");
-    if (government_config_load(path, config) < 0 || government_cache_open(cache, config) < 0) {
+    int configured = government_config_load(path, config) == 0;
+    display_end();
+    while (!configured) {
+        if (!input_retry_configuration()) { free(config); free(cache); return EXIT_FAILURE; }
+        display_begin("INICIO DEL CONSULTOR");
+        configured = government_config_load(path, config) == 0;
+        display_end();
+    }
+    display_begin("INICIO DEL CONSULTOR");
+    if (government_cache_open(cache, config) < 0) {
         display_end(); free(config); free(cache); return EXIT_FAILURE;
     }
     display_end();
@@ -188,7 +184,7 @@ int government_run(const char *path)
     int failed = 0, done = 0;
     while (!done) {
         if (isatty(STDIN_FILENO)) { fputs("gobierno> ", stdout); fflush(stdout); }
-        char line[256]; int result = read_command(line, sizeof line);
+        char line[256]; int result = input_line(stdin, line, sizeof line);
         if (result <= 0) { if (result < 0) failed = 1; break; }
         char *command = line;
         while (isspace((unsigned char)*command)) command++;
@@ -217,8 +213,11 @@ int government_run(const char *path)
             fputs("Comando inválido. Usa ayuda.\n", display_errors()); display_end();
         }
     }
+    if (government_cache_close(cache) < 0) {
+        display_perror("Cerrar historial de consultas"); failed = 1;
+    }
     display_begin("CIERRE DEL CONSULTOR");
     fputs(failed ? "El consultor terminó por un error; las tiendas continúan operando.\n" : "Consultor finalizado; historial conservado.\n", display_output());
-    display_end(); government_cache_close(cache); free(config); free(cache);
+    display_end(); free(config); free(cache);
     return failed ? EXIT_FAILURE : EXIT_SUCCESS;
 }

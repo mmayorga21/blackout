@@ -171,11 +171,14 @@ class RecoveryTests(StoreFixture, unittest.TestCase):
         self.assertEqual(state.read_bytes(), damaged)
 
     def test_paged_cut_with_many_sales_and_rejoining_member(self):
-        for name in "ABC": self.start(name)
+        # El escenario también verifica crecimiento del índice, con margen para TSan y fsync.
+        for name in "ABC":
+            self.configure(name, timeout=3000)
+            self.start(name)
         self.settle()
-        self.current["A"].send("venta 1\n" * 17)
-        self.current["B"].send("venta 2\n" * 13)
-        self.until(lambda: self.equal("ABC", 30))
+        self.current["A"].send("venta 1\n" * 37)
+        self.current["B"].send("venta 2\n" * 23)
+        self.until(lambda: self.equal("ABC", 60), timeout=30)
         self.command("A", "cerrar", "Cierre de cadena solicitado")
         self.until(lambda: self.closed("ABC"))
         before = {row["identificador"] for row in self.rows("A")}

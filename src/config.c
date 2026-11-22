@@ -52,7 +52,7 @@ int config_load(const char *path, store_config *config, FILE *errors)
 {
     static const char *keys[] = {
         "store_id", "chain_id", "bind_address", "port", "limit_cent",
-        "timeout_ms", "queue_capacity", "data_dir", "peers_file", "sale_share_delay_ms", "query_port"
+        "timeout_ms", "queue_capacity", "data_dir", "peers_file", "sale_share_delay_ms", "query_port", "control_timeout_ms", "close_timeout_ms"
     };
     store_config candidate = { .sale_share_delay_ms = 5000 };
     unsigned int seen = 0;
@@ -135,6 +135,14 @@ int config_load(const char *path, store_config *config, FILE *errors)
         case 8:
             result = copy_text(candidate.peers_file, sizeof candidate.peers_file, value);
             break;
+        case 11:
+        case 12:
+            result = number(value, 1, CONFIG_WAIT_MAX_MS, &numeric);
+            if (result == 0) {
+                if (index == 11) candidate.control_timeout_ms = (unsigned int)numeric;
+                else candidate.close_timeout_ms = (unsigned int)numeric;
+            }
+            break;
         case 10:
             result = number(value, 0, 65535, &numeric);
             if (result == 0) candidate.query_port = (unsigned int)numeric;
@@ -166,7 +174,17 @@ int config_load(const char *path, store_config *config, FILE *errors)
         fprintf(errors, "%s: query_port debe ser distinto de port.\n", path);
         failed = 1;
     }
+    if ((strcmp(candidate.chain_id, "none") == 0) != (strcmp(candidate.peers_file, "none") == 0)) {
+        fprintf(errors, "Configuración incoherente (%s): cadena y catálogo deben estar definidos juntos.\n", path);
+        failed = 1;
+    }
     if (failed) return -1;
+    uint64_t control = (uint64_t)candidate.timeout_ms * 2;
+    uint64_t closing = control + candidate.sale_share_delay_ms;
+    if (!(seen & (1U << 11)))
+        candidate.control_timeout_ms = (unsigned int)(control > CONFIG_WAIT_MAX_MS ? CONFIG_WAIT_MAX_MS : control);
+    if (!(seen & (1U << 12)))
+        candidate.close_timeout_ms = (unsigned int)(closing > CONFIG_WAIT_MAX_MS ? CONFIG_WAIT_MAX_MS : closing);
     *config = candidate;
     return 0;
 }

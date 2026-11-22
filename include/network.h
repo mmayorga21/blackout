@@ -5,6 +5,7 @@
 #include "work_queue.h"
 #include "report.h"
 
+/* TDA opaco: reactor dueño de sockets/membresía, trabajador dueño de rutas durables. */
 typedef struct network_runtime network_runtime;
 network_runtime *network_start(const store_config *config, sales_journal *journal,
                                work_queue *queue, int console_wake);

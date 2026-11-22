@@ -390,5 +390,44 @@ class GovernmentTests(StoreFixture, unittest.TestCase):
         self.assertIn(b"INFORMACION HISTORICA", result.stdout)
         self.assertEqual(len((self.folder / "government/consultas.log").read_bytes().splitlines()), 1)
 
+    def test_configuration_can_be_corrected_in_same_government_process(self):
+        self.start("D")
+        original = self.govconfig.read_text()
+        self.govconfig.write_text(original.replace("timeout_ms=1000", "timeout_ms=incorrecto"))
+        process = subprocess.Popen(PREFIX + [str(BINARY), "--gobierno", str(self.govconfig)], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        import selectors
+        selector = selectors.DefaultSelector(); selector.register(process.stderr, selectors.EVENT_READ)
+        messages = b""; deadline = time.monotonic() + 5
+        try:
+            while b"q para salir:" not in messages:
+                self.assertLess(time.monotonic(), deadline)
+                if selector.select(.1):
+                    part = os.read(process.stderr.fileno(), 65536)
+                    self.assertTrue(part)
+                    messages += part
+            self.assertIsNone(process.poll())
+            self.govconfig.write_text(original)
+            out, err = process.communicate(b"\nconsultar D\nsalir\n", timeout=10)
+            self.assertEqual(process.returncode, 0, messages + err)
+            self.assertIn(b"RESPUESTA ACTUAL", out)
+        finally:
+            selector.close()
+            if process.poll() is None:
+                process.kill(); process.communicate(timeout=5)
+
+    def test_duplicate_members_in_report_are_rejected(self):
+        def respond(sock, stop):
+            sock.recv(128)
+            prefix = b"Q9|A|X|1|1|5|5|100000|1|3|A,A|."
+            sock.sendall(frame(prefix + f"|{zlib.crc32(prefix):08x}\n".encode()))
+        server = ControlledServer(respond); self.addCleanup(server.close)
+        self.catalog.write_text(f"A X 127.0.0.1 {server.port}\n")
+        result = self.government("consultar A\nsalir\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"RESPUESTA INVALIDA", result.stdout)
+        self.assertNotIn(b"RESPUESTA ACTUAL", result.stdout)
+        self.assertEqual((self.folder / "government/consultas.log").read_bytes(), b"")
+
 
 if __name__ == "__main__": unittest.main()

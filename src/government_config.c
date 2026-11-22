@@ -1,6 +1,7 @@
 #include "government.h"
 #include "sale.h"
 #include "display.h"
+#include "input.h"
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -54,11 +55,12 @@ int government_config_load(const char *path, government_config *config)
     while (fgets(line, sizeof line, file)) {
         if (!strchr(line, '\n') && !feof(file)) { failed = 1; break; }
         char *start = trim(line); if (!*start || *start == '#') continue;
-        government_endpoint endpoint; char port[16], extra;
+        government_endpoint endpoint; char *fields[4];
         struct in_addr address; uintmax_t n;
-        if (config->count == GOVERNMENT_STORES || sscanf(start, "%32s %32s %15s %15s %c", endpoint.id, endpoint.chain, endpoint.address, port, &extra) != 4 ||
-            !sale_identifier(endpoint.id) || !strcmp(endpoint.id, "todas") || !sale_identifier(endpoint.chain) ||
-            inet_pton(AF_INET, endpoint.address, &address) != 1 || number(port, 65535, &n) < 0) { failed = 1; break; }
+        if (config->count == GOVERNMENT_STORES || input_fields(start, fields, 4) < 0 ||
+            !sale_identifier(fields[0]) || !strcmp(fields[0], "todas") || !sale_identifier(fields[1]) ||
+            strlen(fields[2]) >= sizeof endpoint.address || inet_pton(AF_INET, fields[2], &address) != 1 || number(fields[3], 65535, &n) < 0) { failed = 1; break; }
+        strcpy(endpoint.id, fields[0]); strcpy(endpoint.chain, fields[1]); strcpy(endpoint.address, fields[2]);
         endpoint.port = (unsigned int)n;
         for (size_t i = 0; i < config->count; i++) if (!strcmp(config->stores[i].id, endpoint.id) ||
             (!strcmp(config->stores[i].address, endpoint.address) && config->stores[i].port == endpoint.port)) failed = 1;

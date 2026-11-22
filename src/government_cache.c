@@ -120,7 +120,7 @@ int government_cache_save(government_cache *cache, const government_config *conf
     const store_report *report = &observation->report;
     const char *received = observation->received;
     const government_endpoint *endpoint = &config->stores[index];
-    char wire[REPORT_WIRE_SIZE]; int n = report_encode(report, wire, sizeof wire); if (n < 0) return -1;
+    char wire[REPORT_WIRE_SIZE]; int n = report_encode(report, wire, sizeof wire); if (n <= 0) return -1;
     wire[n - 1] = '\0';
     char line[CACHE_LINE];
     n = snprintf(line, sizeof line, "G9|%s|%s|%s|%u|%s|%" PRId64 "|%s", endpoint->id, endpoint->chain, endpoint->address, endpoint->port, received, observation->observed_at, wire);
@@ -129,9 +129,12 @@ int government_cache_save(government_cache *cache, const government_config *conf
     if (tail < 0 || (size_t)tail >= sizeof line - (size_t)n || control_write(cache->fd, line, (size_t)(n + tail)) < 0) return -1;
     cache->latest[index] = *observation; return 0;
 }
-void government_cache_close(government_cache *cache)
+int government_cache_close(government_cache *cache)
 {
-    if (cache->fd >= 0) close(cache->fd);
-    if (cache->lock_fd >= 0) close(cache->lock_fd);
+    int saved = 0;
+    if (cache->fd >= 0 && close(cache->fd) < 0) saved = errno;
+    if (cache->lock_fd >= 0 && close(cache->lock_fd) < 0 && !saved) saved = errno;
     cache->fd = cache->lock_fd = -1;
+    if (saved) { errno = saved; return -1; }
+    return 0;
 }

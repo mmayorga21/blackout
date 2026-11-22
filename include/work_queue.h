@@ -11,7 +11,8 @@ typedef enum { REQUEST_SALE, REQUEST_STATUS, REQUEST_HISTORY, REQUEST_HELP, REQU
 typedef struct {
     request_kind kind;
     int64_t amount;
-    char sale_csv[SALE_CSV_SIZE];
+    char sale_csv[SALE_CSV_SIZE]; /* REQUEST_REMOTE: venta completa con CRC. */
+    char sale_id[SALE_ID_SIZE];   /* REQUEST_PROGRESS: identidad, sin CSV. */
     uint64_t connection;
     unsigned int connection_slot;
     char sender[33];
@@ -20,7 +21,7 @@ typedef struct {
     char scope[2048];
     size_t target;
     uint64_t route_version;
-    char progress;
+    char progress; /* A/S: avance del origen; O: conciliación durante cierre. */
 } work_request;
 typedef enum { QUEUE_RUNNING, QUEUE_STOPPED, QUEUE_ERROR } queue_stop_reason;
 

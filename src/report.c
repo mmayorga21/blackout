@@ -13,9 +13,12 @@ static int identifiers(const char *text)
     char copy[REPORT_LIST_SIZE]; strcpy(copy, text);
     char *cursor = copy;
     size_t count = 0;
+    char *seen[32];
     while (cursor) {
         char *next = strchr(cursor, ','); if (next) *next++ = '\0';
-        if (!sale_identifier(cursor) || ++count > 32) return 0;
+        if (!sale_identifier(cursor) || count == 32) return 0;
+        for (size_t i = 0; i < count; i++) if (!strcmp(seen[i], cursor)) return 0;
+        seen[count++] = cursor;
         cursor = next;
     }
     return 1;
@@ -75,12 +78,12 @@ int report_decode(const char *wire, store_report *report)
 void report_print(const store_report *report)
 {
     static const char *states[] = { "ABIERTA", "SOLO_CONSULTA", "ERROR_ALMACENAMIENTO" };
-    static const char *links[] = { "INDEPENDIENTE", "ACTIVADA", "AISLADA" };
-    static const char *closing[] = { "NO_APLICA", "NO_INICIADO", "SINCRONIZANDO", "SINCRONIZADO_CONECTADAS" };
     fprintf(display_output(), "Tienda: %s | Cadena: %s\nEstado comercial informado: %s\nVentas registradas: %" PRIu64
         "\nIngresos propios: %" PRId64 " centavos\n", report->store_id, report->chain_id,
         states[report->commercial], report->count, report->own_cent);
     if (strcmp(report->chain_id, "none")) {
+        static const char *links[] = { "INDEPENDIENTE", "ACTIVADA", "AISLADA" };
+        static const char *closing[] = { "NO_APLICA", "NO_INICIADO", "SINCRONIZANDO", "SINCRONIZADO_CONECTADAS" };
         fprintf(display_output(), "Ingresos conocidos de cadena: %" PRId64 " centavos\nLímite compartido de cadena: %" PRId64
             " centavos\nRed de cadena: %s\nCierre informado: %s\nGrupo conectado observado: %s\nRecuperación pendiente con: %s\n",
             report->known_cent, report->limit_cent, links[report->link], closing[report->closing], report->group,

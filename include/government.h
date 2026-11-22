@@ -13,6 +13,7 @@ typedef struct {
     government_endpoint stores[GOVERNMENT_STORES];
 } government_config;
 typedef struct { int present; int64_t observed_at; char received[32]; store_report report; } government_observation;
+/* Solo el hilo principal del consultor escribe el caché, bajo bloqueo de archivo. */
 typedef struct {
     int fd, lock_fd;
     government_observation latest[GOVERNMENT_STORES];
@@ -21,6 +22,6 @@ int government_config_load(const char *path, government_config *config);
 int government_cache_open(government_cache *cache, const government_config *config);
 int government_cache_save(government_cache *cache, const government_config *config, size_t index,
                           const government_observation *observation);
-void government_cache_close(government_cache *cache);
+int government_cache_close(government_cache *cache);
 int government_run(const char *path);
 #endif

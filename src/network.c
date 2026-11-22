@@ -42,7 +42,7 @@ typedef struct {
     int fd, outgoing, connecting, ready, legacy, hello_sent, waiting_ack, waiting_worker, pending, pong, leaving;
     size_t peer, tx_length, tx_sent, rx_length, outstanding_target, notice_cursor;
     uint64_t token, sent_revision, outstanding_version, incarnation;
-    int outstanding_normal, freeze_sent;
+    int outstanding_normal, freeze_sent, inventory_yield;
     inventory_cut incoming_cut, outgoing_cut;
     char outstanding[SALE_ID_SIZE];
     int64_t started, last_rx, last_tx, sent_at;
@@ -71,6 +71,7 @@ struct network_runtime {
     size_t member_count, own;
     shared_route *records;
     size_t count, capacity;
+    size_t *record_index, record_index_capacity;
     reply_slot replies[MAX_CONNECTIONS];
     peer_connection connections[MAX_CONNECTIONS];
     int active[PEERS_MAX];
@@ -100,6 +101,14 @@ static int64_t milliseconds(void)
     if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) { display_perror("Reloj de red"); exit(EXIT_FAILURE); }
     return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
+/* Reloj monotónico: los plazos no dependen de cambios en la fecha del sistema. */
+static struct timespec deadline_after(unsigned int duration_ms)
+{
+    int64_t when = milliseconds() + duration_ms;
+    return (struct timespec){ .tv_sec = (time_t)(when / 1000), .tv_nsec = (long)(when % 1000) * 1000000 };
+}
+
+/* Transporte no bloqueante y notificaciones entre reactor y trabajador. */
 static int nonblocking(int fd)
 {
     int flags = fcntl(fd, F_GETFL);
@@ -115,11 +124,8 @@ void network_notify(network_runtime *network)
 static void drain(int fd)
 {
     char data[256];
-    for (;;) {
-        ssize_t n = read(fd, data, sizeof data);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return;
-    }
+    ssize_t n = read(fd, data, sizeof data);
+    while (n > 0 || (n < 0 && errno == EINTR)) n = read(fd, data, sizeof data);
 }
 static int stopping(network_runtime *network)
 {
@@ -147,11 +153,35 @@ static void refresh_view(network_runtime *network)
     checked(pthread_cond_broadcast(&network->changed));
     checked(pthread_mutex_unlock(&network->mutex));
 }
+/* El índice guarda posiciones, no punteros: sigue válido tras realloc. Mutex adquirido. */
 static size_t record_find(network_runtime *network, const char *id)
 {
-    for (size_t i = 0; i < network->count; i++) if (!strcmp(network->records[i].route.sale.id, id)) return i;
+    if (!network->record_index_capacity) return SIZE_MAX;
+    size_t slot = sale_crc(id, strlen(id)) & (network->record_index_capacity - 1);
+    while (network->record_index[slot]) {
+        size_t position = network->record_index[slot] - 1;
+        if (!strcmp(network->records[position].route.sale.id, id)) return position;
+        slot = (slot + 1) & (network->record_index_capacity - 1);
+    }
     return SIZE_MAX;
 }
+static int reserve_record_index(network_runtime *network)
+{
+    if (network->count + 1 < network->record_index_capacity / 2) return 0;
+    size_t capacity = network->record_index_capacity ? network->record_index_capacity * 2 : 64;
+    if (capacity < network->record_index_capacity || capacity > SIZE_MAX / sizeof(size_t)) { errno = ENOMEM; return -1; }
+    size_t *index = calloc(capacity, sizeof *index);
+    if (!index) return -1;
+    for (size_t i = 0; i < network->count; i++) {
+        const char *id = network->records[i].route.sale.id;
+        size_t slot = sale_crc(id, strlen(id)) & (capacity - 1);
+        while (index[slot]) slot = (slot + 1) & (capacity - 1);
+        index[slot] = i + 1;
+    }
+    free(network->record_index); network->record_index = index; network->record_index_capacity = capacity;
+    return 0;
+}
+/* Publicación de copias durables. La contabilidad sigue siendo de único escritor. */
 static int merge_record(network_runtime *network, const sale_route *route, int applied, int64_t ready)
 {
     checked(pthread_mutex_lock(&network->mutex));
@@ -164,7 +194,11 @@ static int merge_record(network_runtime *network, const sale_route *route, int a
             if (!records) goto no_memory;
             network->records = records; network->capacity = capacity;
         }
+        if (reserve_record_index(network) < 0) goto no_memory;
         position = network->count++;
+        size_t slot = sale_crc(route->sale.id, strlen(route->sale.id)) & (network->record_index_capacity - 1);
+        while (network->record_index[slot]) slot = (slot + 1) & (network->record_index_capacity - 1);
+        network->record_index[slot] = position + 1;
         network->records[position] = (shared_route){ .route = *route, .ready_at = ready };
     } else if (route->version >= network->records[position].route.version) network->records[position].route = *route;
     if (applied && !network->records[position].applied) {
@@ -270,7 +304,7 @@ int network_receive(network_runtime *network, const work_request *request, sales
 
 int network_advance(network_runtime *network, const work_request *request)
 {
-    size_t position = route_log_find(&network->routes, request->sale_csv);
+    size_t position = route_log_find(&network->routes, request->sale_id);
     if (position == SIZE_MAX) return -1;
     sale_route route = network->routes.records[position];
     if (route.version == request->route_version && request->target == route_first_pending(&route) &&
@@ -423,6 +457,7 @@ static void mark_progress(network_runtime *network, size_t index, size_t target,
         record->event_version = record->route.version;
     }
 }
+/* Despacho de mensajes: valida rol/formato y encola operaciones contables. */
 static int handle(network_runtime *network, size_t slot, unsigned char type, char *body)
 {
     peer_connection *connection = &network->connections[slot];
@@ -443,8 +478,8 @@ static int handle(network_runtime *network, size_t slot, unsigned char type, cha
         size_t found = record_find(network, body);
         if (found != SIZE_MAX) {
             shared_route *record = &network->records[found];
-            if (type == ACK) record->registered_token[connection->peer] = connection->token;
             if (type == ACK) {
+                record->registered_token[connection->peer] = connection->token;
                 record->ack_token[connection->peer] = connection->token;
                 record->ack_version[connection->peer] = connection->outstanding_version;
                 record->retry_delivery[connection->peer] = 0;
@@ -546,7 +581,10 @@ static void prepare_output(network_runtime *network, size_t slot)
         }
         frame(connection, MEMBERS, body, used); connection->sent_revision = network->book.revision; return;
     }
-    if (!connection->legacy && inventory_output(network, connection)) return;
+    /* Alternar páginas y ventas evita postergar datos por un inventario grande. */
+    if (!connection->legacy && !connection->inventory_yield && inventory_output(network, connection)) {
+        connection->inventory_yield = 1; return;
+    }
     if (!connection->waiting_ack) {
         checked(pthread_mutex_lock(&network->mutex));
         int64_t now = milliseconds();
@@ -589,10 +627,14 @@ static void prepare_output(network_runtime *network, size_t slot)
             strcpy(connection->outstanding, route->sale.id);
             connection->outstanding_version = route->version; connection->outstanding_normal = normal;
             connection->outstanding_target = target; connection->waiting_ack = 1; connection->sent_at = now;
+            connection->inventory_yield = 0;
             if (normal && !record->target_since) record->target_since = now;
             checked(pthread_mutex_unlock(&network->mutex)); return;
         }
         checked(pthread_mutex_unlock(&network->mutex));
+    }
+    if (!connection->legacy && inventory_output(network, connection)) {
+        connection->inventory_yield = 1; return;
     }
     int64_t interval = network->config.timeout_ms / 2; if (!interval) interval = 1;
     if (milliseconds() - connection->last_tx >= interval) frame(connection, PING, NULL, 0);
@@ -650,7 +692,7 @@ static void schedule_controls(network_runtime *network)
         if (record->control_pending == 1) {
             work_request request = { .kind = REQUEST_PROGRESS, .target = record->event_target,
                 .route_version = record->event_version, .progress = record->event };
-            strcpy(request.sale_csv, route->sale.id);
+            strcpy(request.sale_id, route->sale.id);
             if (!queue_try_put(network->queue, request)) record->control_pending = 2;
         }
     }
@@ -688,8 +730,9 @@ static void farewell(network_runtime *network)
     /* Aviso de salida de mejor esfuerzo, sin intercalar bytes dentro de otro mensaje. */
     int64_t end = milliseconds() + network->config.timeout_ms;
     int queued[MAX_CONNECTIONS] = {0};
-    for (;;) {
-        struct pollfd descriptors[MAX_CONNECTIONS]; int pending = 0;
+    int pending = 1;
+    while (pending) {
+        struct pollfd descriptors[MAX_CONNECTIONS]; pending = 0;
         for (size_t i = 0; i < MAX_CONNECTIONS; i++) {
             peer_connection *connection = &network->connections[i];
             if (connection->fd >= 0 && connection->ready && !connection->legacy && !queued[i] &&
@@ -700,8 +743,8 @@ static void farewell(network_runtime *network)
             if (connection->fd >= 0 && connection->ready && !connection->legacy &&
                 (!queued[i] || connection->tx_sent < connection->tx_length)) { descriptors[i].events = POLLOUT; pending = 1; }
         }
-        if (!pending || milliseconds() >= end) return;
-        int64_t remaining = end - milliseconds(); if (remaining <= 0) return;
+        int64_t remaining = end - milliseconds();
+        if (!pending || remaining <= 0) return;
         int n = poll(descriptors, MAX_CONNECTIONS, (int)remaining);
         if (n < 0) { if (errno == EINTR) continue; return; }
         for (size_t i = 0; i < MAX_CONNECTIONS; i++) {
@@ -768,7 +811,7 @@ int network_connection(network_runtime *network, int connected)
     network->certified_revision = 0;
     checked(pthread_cond_broadcast(&network->changed));
     checked(pthread_mutex_unlock(&network->mutex)); network_notify(network);
-    struct timespec end; clock_gettime(CLOCK_MONOTONIC, &end); end.tv_sec += 5;
+    struct timespec end = deadline_after(network->config.control_timeout_ms);
     checked(pthread_mutex_lock(&network->mutex));
     int result = 0;
     while (network->offline_active != value && !result)
@@ -885,6 +928,7 @@ static int parse_number(const char *text, uint64_t *value)
     *value = (uint64_t)n; return 0;
 }
 
+/* Inventarios exactos y evidencia de cierre; nunca se comparan solo ingresos. */
 static int inventory_input(network_runtime *network, peer_connection *connection, char *body)
 {
     char *lines = strchr(body, '\n'); if (!lines) return -1; *lines++ = '\0';
@@ -1096,11 +1140,7 @@ static int outgoing_complete_locked(network_runtime *network)
 void network_wait_exit(network_runtime *network)
 {
     if (!network) return;
-    struct timespec end; clock_gettime(CLOCK_MONOTONIC, &end);
-    uint64_t wait = (uint64_t)network->config.timeout_ms * 2 + network->config.sale_share_delay_ms;
-    if (wait > 60000) wait = 60000;
-    end.tv_sec += (time_t)(wait / 1000); end.tv_nsec += (long)(wait % 1000) * 1000000;
-    if (end.tv_nsec >= 1000000000) { end.tv_sec++; end.tv_nsec -= 1000000000; }
+    struct timespec end = deadline_after(network->config.close_timeout_ms);
     checked(pthread_mutex_lock(&network->mutex));
     int result = 0;
     while ((!network->exit_prepared || !outgoing_complete_locked(network)) && !result)
@@ -1120,6 +1160,7 @@ void network_wait_exit(network_runtime *network)
     display_end();
 }
 
+/* Reactor: solo este hilo es dueño de los sockets y del catálogo de membresía. */
 static void *network_loop(void *argument)
 {
     network_runtime *network = argument;
@@ -1351,7 +1392,7 @@ failure:
     membership_close(&network->book); route_log_close(&network->routes); chain_state_close(&network->state);
     for (size_t i = 0; i < PEERS_MAX; i++) free(network->cuts[i].records);
     checked(pthread_cond_destroy(&network->changed));
-    checked(pthread_mutex_destroy(&network->mutex)); free(network->records); free(network->notices); free(network);
+    checked(pthread_mutex_destroy(&network->mutex)); free(network->record_index); free(network->records); free(network->notices); free(network);
     return NULL;
 }
 void network_quiesce(network_runtime *network)
@@ -1364,9 +1405,10 @@ void network_destroy(network_runtime *network)
 {
     if (!network) return;
     network_quiesce(network);
-    close(network->listener); close(network->wake[0]); close(network->wake[1]);
+    if (network->listener >= 0) close(network->listener);
+    close(network->wake[0]); close(network->wake[1]);
     membership_close(&network->book); route_log_close(&network->routes); chain_state_close(&network->state);
     for (size_t i = 0; i < PEERS_MAX; i++) free(network->cuts[i].records);
     checked(pthread_cond_destroy(&network->changed));
-    checked(pthread_mutex_destroy(&network->mutex)); free(network->records); free(network->notices); free(network);
+    checked(pthread_mutex_destroy(&network->mutex)); free(network->record_index); free(network->records); free(network->notices); free(network);
 }

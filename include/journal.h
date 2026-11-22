@@ -3,6 +3,7 @@
 
 #include "config.h"
 
+/* Tras abrir: solo el trabajador muta contabilidad; consultas usan su misma cola. */
 typedef struct {
     struct chain_data *chain;
     int fd;

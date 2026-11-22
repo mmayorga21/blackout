@@ -59,6 +59,37 @@ Para probar una cadena con límite compartido de 300000 centavos, mayor que los 
 
 Usan los puertos 5301–5303 y guardan historiales separados en `data/demo-ocho/A`, B y C. Elige un conjunto de configuraciones para cada prueba.
 
+## Iniciar los perfiles para pruebas manuales
+
+Estos perfiles usan historiales separados en `data/manual/`. Abre una terminal por proceso y ejecuta los que necesites:
+
+```sh
+./bin/blackout --config config/manual/tienda-a.conf
+./bin/blackout --config config/manual/tienda-b.conf
+./bin/blackout --config config/manual/tienda-c.conf
+./bin/blackout --config config/manual/tienda-d.conf
+./bin/blackout --config config/manual/tienda-e.conf
+./bin/blackout --config config/manual/tienda-f.conf
+./bin/blackout --gobierno config/manual/gobierno.conf
+```
+
+A/B/C comparten el límite de X de 30000 centavos; E/F comparten el de Y de 20000; D tiene su límite independiente de 10000. Los puertos entre tiendas son 5501–5503 y 5505–5506; las consultas usan 6501–6506. Las rutas de datos se crean al iniciar y se conservan entre ejecuciones.
+
+## Corregir la configuración al iniciar
+
+Si un archivo de configuración o catálogo tiene un error, el programa permite corregir el mismo archivo y pulsar Enter para reintentar sin reiniciar el proceso. Escribe `q` para cancelar. Esto funciona tanto para tiendas como para el consultor. Una invocación incorrecta muestra el uso y termina; un error grave de almacenamiento o corrupción detiene el proceso para conservar los datos y permitir su revisión.
+
+En la configuración de tienda puedes ajustar estos plazos, en milisegundos:
+
+| Clave | Uso y valor si se omite |
+| --- | --- |
+| `timeout_ms` | Plazo de red requerido. |
+| `sale_share_delay_ms` | Espera antes de compartir ventas propias nuevas; 5000 si se omite. No retrasa artificialmente comandos ni confirmaciones. |
+| `control_timeout_ms` | Espera máxima local para aplicar `conectar` o `desconectar`; el doble de `timeout_ms`, limitado a 60000, si se omite. No garantiza que otros procesos ya hayan detectado la conexión. |
+| `close_timeout_ms` | Espera máxima al salir para intentar compartir pendientes; el doble de `timeout_ms` más `sale_share_delay_ms`, limitado a 60000, si se omite. |
+
+Los dos últimos admiten de 1 a 60000. Un plazo de salida vencido conserva los pendientes para el próximo inicio; no certifica una sincronización que no se haya completado.
+
 ## Comandos de las tiendas
 
 Escribe un comando y pulsa Enter en la terminal de la tienda correspondiente:

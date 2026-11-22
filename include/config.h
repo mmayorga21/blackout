@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+enum { CONFIG_WAIT_MAX_MS = 60000 };
+
 typedef struct {
     char store_id[33];
     char chain_id[33];
@@ -12,6 +14,8 @@ typedef struct {
     unsigned int query_port;
     int64_t limit_cent;
     unsigned int timeout_ms;
+    unsigned int control_timeout_ms;
+    unsigned int close_timeout_ms;
     unsigned int sale_share_delay_ms;
     unsigned int queue_capacity;
     char data_dir[256];

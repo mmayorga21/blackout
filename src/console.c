@@ -267,7 +267,7 @@ static int receive_commands(console_runtime *runtime)
     int invalid = 0;
     int interactive = isatty(STDIN_FILENO);
     if (interactive) display_prompt();
-    for (;;) {
+    while (queue_reason(&runtime->queue) == QUEUE_RUNNING) {
         int ready;
         do { ready = poll(watched, 2, -1); } while (ready < 0 && errno == EINTR);
         if (ready < 0) { display_perror("Esperar entrada"); return -1; }
@@ -305,6 +305,7 @@ static int receive_commands(console_runtime *runtime)
             else if (!invalid) line[used++] = chunk[i];
         }
     }
+    return 2;
 }
 
 int console_run(local_store *store)
