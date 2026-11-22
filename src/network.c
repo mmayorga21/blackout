@@ -1207,6 +1207,36 @@ static void *network_loop(void *argument)
     return NULL;
 }
 
+int network_observe(network_runtime *network, store_report *report)
+{
+    if (!network) return 0;
+    checked(pthread_mutex_lock(&network->mutex));
+    report->link = network->offline_desired ? REPORT_ISOLATED : REPORT_NETWORK_ACTIVE;
+    if (network->frozen_requested && report->commercial != REPORT_STORAGE_ERROR) report->commercial = REPORT_READONLY;
+    char scope[SCOPE_SIZE]; scope_locked(network, scope);
+    size_t count; sale_record *cut = closed_cut_locked(network, &count, scope);
+    int certified = cut && network->certified_revision == network->sales_revision && !strcmp(scope, network->certified_scope);
+    free(cut);
+    report->closing = network->frozen_requested ? (certified ? REPORT_SYNCHRONIZED : REPORT_SYNCHRONIZING) : REPORT_NOT_CLOSING;
+    sale_record *local = snapshot_locked(network, &count, 0);
+    if (!local) { checked(pthread_mutex_unlock(&network->mutex)); return -1; }
+    size_t group = 0, pending = 0;
+    for (size_t i = 0; i < network->member_count; i++) {
+        const char *id = network->view[i].peer.id;
+        if (i == network->own || (!network->offline_desired && network->online[i])) {
+            int n = snprintf(report->group + group, sizeof report->group - group, "%s%s", group ? "," : "", id);
+            group += (size_t)n;
+        }
+        if (i != network->own && (network->offline_desired || !network->online[i] ||
+            network->cuts[i].token != network->online_token[i] || !equal_cut(&network->cuts[i], local, count))) {
+            int n = snprintf(report->pending + pending, sizeof report->pending - pending, "%s%s", pending ? "," : "", id);
+            pending += (size_t)n;
+        }
+    }
+    if (!pending) strcpy(report->pending, ".");
+    free(local); checked(pthread_mutex_unlock(&network->mutex)); return 0;
+}
+
 void network_status(network_runtime *network)
 {
     if (!network) return;

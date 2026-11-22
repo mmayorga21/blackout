@@ -59,7 +59,7 @@ Para probar una cadena con límite compartido de 300000 centavos, mayor que los 
 
 Usan los puertos 5301–5303 y guardan historiales separados en `data/demo-ocho/A`, B y C. Elige un conjunto de configuraciones para cada prueba.
 
-## Comandos de la consola
+## Comandos de las tiendas
 
 Escribe un comando y pulsa Enter en la terminal de la tienda correspondiente:
 
@@ -89,3 +89,40 @@ Para consultar únicamente el historial guardado y terminar, sin abrir la consol
 ```
 
 Sustituye el archivo de configuración para consultar otra tienda. La tienda debe estar detenida antes de abrir esta consulta sobre sus mismos datos.
+
+
+## Iniciar y usar el consultor del gobierno
+
+Con las tiendas originales iniciadas, abre otra terminal desde la raíz del repositorio:
+
+```sh
+./bin/blackout --gobierno config/gobierno.conf
+```
+
+Si estás usando las tiendas de `config/demo-ocho/`, inicia el consultor con su configuración correspondiente:
+
+```sh
+./bin/blackout --gobierno config/demo-ocho/gobierno.conf
+```
+
+Ambos ejemplos incluyen D, que se inicia con `config/tienda-d.conf`. El gobierno puede iniciarse antes o después de las tiendas; ellas pueden seguir vendiendo si el consultor está apagado.
+
+| Comando del gobierno | Uso |
+| --- | --- |
+| `consultar A` | Consulta el estado y los ingresos de A. Sustituye A por otra identidad del catálogo. |
+| `consultar todas` | Consulta en paralelo todas las tiendas configuradas y muestra una respuesta por tienda. |
+| `ayuda` | Muestra los comandos disponibles del consultor. |
+| `salir` | Termina el consultor conservando las respuestas guardadas. No cierra las tiendas. |
+
+Una `RESPUESTA ACTUAL` fue recibida en esa consulta. Si una tienda no responde o devuelve información inválida, se muestra esa situación y, si existe, su última respuesta como `INFORMACION HISTORICA`, con fecha de recepción y antigüedad aproximada. Esa información no confirma que la tienda siga abierta o cerrada ahora. Los ingresos de cadena son los conocidos por cada tienda; no deben sumarse entre respuestas de integrantes de la misma cadena.
+
+`desconectar` aísla únicamente la comunicación entre tiendas: mientras el proceso siga activo, el gobierno puede consultarlo y verá `Red de cadena: AISLADA`. Después de `salir` o de apagar su computadora, solo estará disponible la información que el consultor haya conservado.
+
+Las respuestas se guardan en `data/gobierno/consultas.log`, o en `data/demo-ocho/gobierno/consultas.log` para ese ejemplo. Se recuperan al volver a iniciar el consultor. Ejecuta un solo consultor por directorio de historial.
+
+Para configurar otros destinos:
+
+- En cada archivo de tienda, `query_port` indica su puerto de consulta, distinto de `port`. Omitirlo o usar `query_port=0` desactiva las consultas remotas.
+- Los ejemplos originales usan los puertos de consulta 6101–6104 para A–D. La demostración de etapa 8 usa 6401–6403 para A–C y 6104 para D.
+- En `gobierno.conf`, `stores_file` apunta al catálogo, `data_dir` selecciona el historial del consultor y `timeout_ms` fija el plazo de consulta.
+- Cada línea del catálogo tiene formato `ID CADENA IPv4 PUERTO_DE_CONSULTA`; D utiliza `none` como cadena. Las identidades y direcciones deben ser únicas. Las rutas se interpretan respecto al directorio de ejecución.

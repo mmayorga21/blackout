@@ -22,7 +22,7 @@ class ConcurrentStore(unittest.TestCase):
         self.configure()
 
     def configure(self, capacity=1, limit=100000):
-        text = (ROOT / "config/tienda-d.conf").read_text()
+        text = (ROOT / "config/tienda-d.conf").read_text().replace("query_port=6104\n", "")
         text = text.replace("data_dir=data/D", f"data_dir={self.data}")
         text = text.replace("queue_capacity=256", f"queue_capacity={capacity}")
         text = text.replace("limit_cent=100000", f"limit_cent={limit}")

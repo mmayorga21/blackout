@@ -1,6 +1,7 @@
 #include "display.h"
 #include "config.h"
 #include "console.h"
+#include "government.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -13,12 +14,13 @@ int main(int argc, char **argv)
     /* La validación usa fgets; luego poll/read reciben comandos sin datos prefetched. */
     if (setvbuf(stdin, NULL, _IONBF, 0) != 0) return EXIT_FAILURE;
     if (argc == 2 && strcmp(argv[1], "--help") == 0) {
-        puts("Uso: blackout --config RUTA [--historial]\nTienda independiente con registro CSV durable de ventas.");
+        puts("Uso: blackout --config RUTA [--historial]\n     blackout --gobierno RUTA\nTiendas independientes, cadenas y consultor del gobierno.");
         return EXIT_SUCCESS;
     }
+    if (argc == 3 && !strcmp(argv[1], "--gobierno")) return government_run(argv[2]);
     if ((argc != 3 && argc != 4) || strcmp(argv[1], "--config") != 0 ||
         (argc == 4 && strcmp(argv[3], "--historial") != 0)) {
-        fputs("Uso: blackout --config RUTA [--historial] (o --help).\n", stderr);
+        fputs("Uso: blackout --config RUTA [--historial], --gobierno RUTA o --help.\n", stderr);
         return EXIT_FAILURE;
     }
     store_config config;

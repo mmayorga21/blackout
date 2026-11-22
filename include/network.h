@@ -3,6 +3,7 @@
 
 #include "journal.h"
 #include "work_queue.h"
+#include "report.h"
 
 typedef struct network_runtime network_runtime;
 network_runtime *network_start(const store_config *config, sales_journal *journal,
@@ -22,6 +23,7 @@ int network_receive(network_runtime *network, const work_request *request, sales
 int network_advance(network_runtime *network, const work_request *request);
 void network_reply(network_runtime *network, const work_request *request, const char *id, int result);
 void network_notify(network_runtime *network);
+int network_observe(network_runtime *network, store_report *report);
 void network_status(network_runtime *network);
 /* Detener/join antes de cerrar productores; liberar solo tras join del trabajador. */
 void network_quiesce(network_runtime *network);

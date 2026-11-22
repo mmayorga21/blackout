@@ -3,6 +3,7 @@
 #include "work_queue.h"
 #include "chain_journal.h"
 #include "network.h"
+#include "query.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -31,6 +32,7 @@ typedef struct {
     int wake[2];
     int worker_result;
     network_runtime *network;
+    query_runtime *query;
 } console_runtime;
 
 static void wake_receiver(console_runtime *runtime)
@@ -57,6 +59,7 @@ static void *process_requests(void *argument)
     queue_stop_reason reason;
     while (queue_take(&runtime->queue, &request, &reason) == 0) {
         network_notify(runtime->network);
+        query_notify(runtime->query);
         if (reason == QUEUE_ERROR) {
             if (request.kind == REQUEST_SALE) {
                 display_begin("COMANDO: venta %" PRId64, request.amount);
@@ -80,7 +83,7 @@ static void *process_requests(void *argument)
         case REQUEST_CONNECT: display_begin("COMANDO: conectar"); break;
         case REQUEST_CLOSE: display_begin("COMANDO: cerrar"); break;
         case REQUEST_SYNC: display_begin("AVISO DE RED: cierre de cadena"); break;
-        case REQUEST_PROGRESS: case REQUEST_CHECKPOINT: case REQUEST_EXIT: break;
+        case REQUEST_PROGRESS: case REQUEST_CHECKPOINT: case REQUEST_EXIT: case REQUEST_QUERY: break;
         }
         switch (request.kind) {
         case REQUEST_SALE: {
@@ -174,6 +177,16 @@ static void *process_requests(void *argument)
                 runtime->worker_result = -1; stop_worker(runtime, QUEUE_ERROR);
             }
             break;
+        case REQUEST_QUERY: {
+            store_report report = { .count = runtime->store->journal.count,
+                .own_cent = runtime->store->journal.chain ? runtime->store->journal.own_total_cent : runtime->store->journal.total_cent,
+                .known_cent = runtime->store->journal.total_cent, .limit_cent = runtime->store->config.limit_cent,
+                .commercial = runtime->store->storage_failed ? REPORT_STORAGE_ERROR : store_at_limit(runtime->store) ? REPORT_READONLY : REPORT_OPEN };
+            strcpy(report.store_id, runtime->store->config.store_id); strcpy(report.chain_id, runtime->store->config.chain_id);
+            strcpy(report.group, "."); strcpy(report.pending, ".");
+            if (network_observe(runtime->network, &report) == 0) query_reply(runtime->query, &request, &report);
+            break;
+        }
         case REQUEST_EXIT:
             network_prepare_exit(runtime->network);
             break;
@@ -310,10 +323,18 @@ int console_run(local_store *store)
             close(runtime.wake[0]); close(runtime.wake[1]); queue_destroy(&runtime.queue); return -1;
         }
     }
+    if (store->config.query_port) {
+        runtime.query = query_start(&store->config, &runtime.queue);
+        if (!runtime.query) {
+            network_destroy(runtime.network);
+            close(runtime.wake[0]); close(runtime.wake[1]); queue_destroy(&runtime.queue); return -1;
+        }
+    }
     store->closing = network_frozen(runtime.network);
     display_begin("ESTADO INICIAL");
     fprintf(display_output(), "%s\n", "Comandos: venta CENTAVOS | estado | historial | ayuda | desconectar | conectar | cerrar | salir");
     store_status(store);
+    if (runtime.query) fprintf(display_output(), "Consultas de gobierno: %s:%u\n", store->config.bind_address, store->config.query_port);
     if (store_at_limit(store)) {
         fprintf(display_output(), "%s\n", "Límite alcanzado: ventas deshabilitadas. Puedes usar estado, historial, ayuda o salir.");
     }
@@ -321,6 +342,7 @@ int console_run(local_store *store)
     int result = pthread_create(&worker, NULL, process_requests, &runtime);
     if (result != 0) {
         fprintf(display_errors(), "Crear hilo de procesamiento: %s\n", strerror(result));
+        query_destroy(runtime.query);
         network_destroy(runtime.network);
         close(runtime.wake[0]); close(runtime.wake[1]); queue_destroy(&runtime.queue); return -1;
     }
@@ -330,6 +352,7 @@ int console_run(local_store *store)
         work_request finish = { .kind = REQUEST_EXIT };
         if (!queue_put(&runtime.queue, finish)) network_wait_exit(runtime.network);
     }
+    query_stop(runtime.query);
     network_quiesce(runtime.network);
     queue_finish(&runtime.queue);
     result = pthread_join(worker, NULL);
@@ -347,6 +370,7 @@ int console_run(local_store *store)
     }
     if (close(runtime.wake[0]) < 0) { display_perror("Cerrar notificación"); failed = 1; }
     if (close(runtime.wake[1]) < 0) { display_perror("Cerrar notificación"); failed = 1; }
+    query_destroy(runtime.query);
     network_destroy(runtime.network);
     queue_destroy(&runtime.queue);
     return failed ? -1 : 0;

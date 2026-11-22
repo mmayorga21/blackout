@@ -9,6 +9,7 @@ typedef struct {
     char chain_id[33];
     char bind_address[16];
     unsigned int port;
+    unsigned int query_port;
     int64_t limit_cent;
     unsigned int timeout_ms;
     unsigned int sale_share_delay_ms;

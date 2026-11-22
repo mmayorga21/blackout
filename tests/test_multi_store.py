@@ -129,7 +129,7 @@ class StoreFixture:
     def configure(self, name, seeds="ABC", delay=0, limit=100000, timeout=1000):
         catalog = self.folder / f"{name}.peers"
         catalog.write_text("".join(f"{peer} 127.0.0.1 {self.ports[peer]}\n" for peer in seeds))
-        text = (ROOT / "config/demo-dos/tienda-a.conf").read_text()
+        text = (ROOT / "config/demo-dos/tienda-a.conf").read_text().replace("query_port=6201\n", "")
         for old, new in [("store_id=A", f"store_id={name}"), ("port=5101", f"port={self.ports[name]}"),
                          ("timeout_ms=2000", f"timeout_ms={timeout}"), ("sale_share_delay_ms=5000", f"sale_share_delay_ms={delay}"),
                          ("queue_capacity=256", "queue_capacity=4"), ("limit_cent=100000", f"limit_cent={limit}"),

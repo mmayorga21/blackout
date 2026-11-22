@@ -105,7 +105,7 @@ class TwoStores(unittest.TestCase):
             self.configure(name)
 
     def configure(self, name, chain="X", limit=100000, capacity=1, delay=0, timeout=500):
-        text = (ROOT / "config/demo-dos/tienda-a.conf").read_text()
+        text = (ROOT / "config/demo-dos/tienda-a.conf").read_text().replace("query_port=6201\n", "")
         text = text.replace("store_id=A", f"store_id={name}")
         text = text.replace("chain_id=X", f"chain_id={chain}")
         text = text.replace("port=5101", f"port={self.ports[name]}")

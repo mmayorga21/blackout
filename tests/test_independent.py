@@ -26,7 +26,7 @@ class IndependentStore(unittest.TestCase):
         self.configure()
 
     def configure(self, limit=100000, store="D", chain="none"):
-        text = (ROOT / "config/tienda-d.conf").read_text()
+        text = (ROOT / "config/tienda-d.conf").read_text().replace("query_port=6104\n", "")
         text = text.replace("data_dir=data/D", f"data_dir={self.data}")
         text = text.replace("limit_cent=100000", f"limit_cent={limit}")
         text = text.replace("store_id=D", f"store_id={store}")

@@ -52,7 +52,7 @@ int config_load(const char *path, store_config *config, FILE *errors)
 {
     static const char *keys[] = {
         "store_id", "chain_id", "bind_address", "port", "limit_cent",
-        "timeout_ms", "queue_capacity", "data_dir", "peers_file", "sale_share_delay_ms"
+        "timeout_ms", "queue_capacity", "data_dir", "peers_file", "sale_share_delay_ms", "query_port"
     };
     store_config candidate = { .sale_share_delay_ms = 5000 };
     unsigned int seen = 0;
@@ -135,6 +135,10 @@ int config_load(const char *path, store_config *config, FILE *errors)
         case 8:
             result = copy_text(candidate.peers_file, sizeof candidate.peers_file, value);
             break;
+        case 10:
+            result = number(value, 0, 65535, &numeric);
+            if (result == 0) candidate.query_port = (unsigned int)numeric;
+            break;
         case 9:
             result = number(value, 0, 60000, &numeric);
             if (result == 0) candidate.sale_share_delay_ms = (unsigned int)numeric;
@@ -156,6 +160,10 @@ int config_load(const char *path, store_config *config, FILE *errors)
     const unsigned int required = (1U << 9) - 1U;
     if ((seen & required) != required) {
         fprintf(errors, "%s: faltan claves obligatorias.\n", path);
+        failed = 1;
+    }
+    if (candidate.query_port && candidate.query_port == candidate.port) {
+        fprintf(errors, "%s: query_port debe ser distinto de port.\n", path);
         failed = 1;
     }
     if (failed) return -1;

@@ -29,7 +29,7 @@ with tempfile.TemporaryDirectory(prefix="blackout-races-") as folder:
         (2, 100000, "venta 3\n" * 20),
     ]):
         config = Path(folder) / f"store-{index}.conf"
-        text = (ROOT / "config/tienda-d.conf").read_text()
+        text = (ROOT / "config/tienda-d.conf").read_text().replace("query_port=6104\n", "")
         text = text.replace("data_dir=data/D", f"data_dir={folder}/store-{index}")
         text = text.replace("queue_capacity=256", f"queue_capacity={capacity}")
         text = text.replace("limit_cent=100000", f"limit_cent={limit}")
@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix="blackout-races-") as folder:
         check(result)
     # Alcanzar el límite no termina el proceso; las consultas posteriores siguen operando.
     config = Path(folder) / "live.conf"
-    config.write_text((ROOT / "config/tienda-d.conf").read_text()
+    config.write_text((ROOT / "config/tienda-d.conf").read_text().replace("query_port=6104\n", "")
                       .replace("data_dir=data/D", f"data_dir={folder}/live")
                       .replace("limit_cent=100000", "limit_cent=1"))
     process = subprocess.Popen(PREFIX + [str(ROOT / "build/tsan/blackout"), "--config", str(config)],
@@ -96,3 +96,13 @@ for pattern in ("disconnect_local", "shared_limit_control", "group_closes", "off
                             capture_output=True, text=True, timeout=60)
     check(result)
 print("ThreadSanitizer: aislamiento, límite compartido, cierre, reincorporación y conciliación paginada sin diagnósticos de carreras.")
+
+
+for pattern in ("independent_live", "chain_queries", "isolated_chain", "queries_observe", "fragmented_request", "readonly_and", "slow_clients"):
+    result = subprocess.run(["python3", "-m", "unittest", "discover", "-s", str(ROOT / "tests"),
+                             "-p", "test_government.py", "-k", pattern, "-v"],
+                            env={**ENV, "BLACKOUT_NETWORK_TEST_BINARY": str(ROOT / "build/tsan/blackout"),
+                                 "BLACKOUT_NETWORK_TEST_TSAN": "1"},
+                            capture_output=True, text=True, timeout=60)
+    check(result)
+print("ThreadSanitizer: consultas de gobierno, aislamiento, caché y snapshots contables sin diagnósticos de carreras.")

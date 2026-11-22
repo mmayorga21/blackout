@@ -11,6 +11,7 @@
 static int sale_started = 0;
 
 static int route_started = 0;
+static int cache_started = 0;
 
 static int is_named(int fd, const char *suffix)
 {
@@ -32,6 +33,10 @@ ssize_t write(int fd, const void *buffer, size_t length)
     memcpy(&real_write, &symbol, sizeof real_write);
     if (real_write == NULL) _exit(98);
     const char *mode = getenv("BLACKOUT_TEST_FAULT");
+    if (mode && is_named(fd, "/consultas.log") && length >= 3 && !memcmp(buffer, "G9|", 3)) {
+        cache_started = 1;
+        if (!strcmp(mode, "cache_enospc")) { errno = ENOSPC; return -1; }
+    }
     if (mode && is_named(fd, "/routes.log") && length >= 3 && !memcmp(buffer, "R7|", 3)) {
         route_started = 1;
         if (!strcmp(mode, "route_partial_exit")) {
@@ -74,6 +79,7 @@ int fsync(int fd)
     memcpy(&real_sync, &symbol, sizeof real_sync);
     if (real_sync == NULL) _exit(98);
     const char *mode = getenv("BLACKOUT_TEST_FAULT");
+    if (mode && !strcmp(mode, "cache_sync_error") && cache_started && is_named(fd, "/consultas.log")) { errno = EIO; return -1; }
     if (mode && ((!strcmp(mode, "route_sync_error") && route_started && is_named(fd, "/routes.log")) ||
                  (!strcmp(mode, "certificate_sync_error") && is_named(fd, "/.close.pending")))) { errno = EIO; return -1; }
     if (mode && is_journal(fd)) {
