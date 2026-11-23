@@ -197,7 +197,7 @@ class IndependentStore(unittest.TestCase):
         self.assertIn("Ventas: 2\nIngresos: 700", restart.stdout)
 
     def test_chain_configuration_not_silently_treated_as_independent(self):
-        self.configure(chain="X")
+        self.configure(chain="Cadena_1")
         result = self.run_store()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Configuración incoherente", result.stderr)

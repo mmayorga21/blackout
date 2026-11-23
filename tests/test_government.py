@@ -80,7 +80,7 @@ class GovernmentTests(StoreFixture, unittest.TestCase):
 
     def government_config(self, names="ABCD", timeout=1000):
         self.catalog = self.folder / "government.stores"
-        self.catalog.write_text("".join(f"{name} {'none' if name == 'D' else 'X'} 127.0.0.1 {self.query_ports[name]}\n" for name in names))
+        self.catalog.write_text("".join(f"{name} {'none' if name == 'D' else 'Cadena_1'} 127.0.0.1 {self.query_ports[name]}\n" for name in names))
         self.govconfig = self.folder / "government.conf"
         self.govconfig.write_text(f"stores_file={self.catalog}\ndata_dir={self.folder}/government\ntimeout_ms={timeout}\n")
 
@@ -275,7 +275,7 @@ class GovernmentTests(StoreFixture, unittest.TestCase):
             sock.recv(128); arrivals.append(time.monotonic()); stop.wait(2)
         servers = [ControlledServer(stall) for _ in range(3)]
         for server in servers: self.addCleanup(server.close)
-        self.catalog.write_text("".join(f"{name} X 127.0.0.1 {server.port}\n" for name, server in zip("ABC", servers)))
+        self.catalog.write_text("".join(f"{name} Cadena_1 127.0.0.1 {server.port}\n" for name, server in zip("ABC", servers)))
         self.govconfig.write_text(self.govconfig.read_text().replace("timeout_ms=1000", "timeout_ms=300"))
         started = time.monotonic(); result = self.government("consultar todas\nsalir\n")
         elapsed = time.monotonic() - started
@@ -419,10 +419,10 @@ class GovernmentTests(StoreFixture, unittest.TestCase):
     def test_duplicate_members_in_report_are_rejected(self):
         def respond(sock, stop):
             sock.recv(128)
-            prefix = b"Q9|A|X|1|1|5|5|100000|1|3|A,A|."
+            prefix = b"Q9|A|Cadena_1|1|1|5|5|100000|1|3|A,A|."
             sock.sendall(frame(prefix + f"|{zlib.crc32(prefix):08x}\n".encode()))
         server = ControlledServer(respond); self.addCleanup(server.close)
-        self.catalog.write_text(f"A X 127.0.0.1 {server.port}\n")
+        self.catalog.write_text(f"A Cadena_1 127.0.0.1 {server.port}\n")
         result = self.government("consultar A\nsalir\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(b"RESPUESTA INVALIDA", result.stdout)

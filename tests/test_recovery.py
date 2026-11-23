@@ -139,7 +139,7 @@ class RecoveryTests(StoreFixture, unittest.TestCase):
         prefix = f"R7|1|2|B,1,P;C,1,P|{csv}"
         proof = f"{prefix}|{zlib.crc32(prefix.encode()):08x}\n".encode()
         with socket.create_connection(("127.0.0.1", self.ports["B"]), timeout=3) as sock:
-            sock.sendall(wire(1, f"X A 100 127.0.0.1 {self.ports['A']} 1 1 0".encode()))
+            sock.sendall(wire(1, f"Cadena_1 A 100 127.0.0.1 {self.ports['A']} 1 1 0".encode()))
             sock.sendall(wire(2, proof))
             while True:
                 kind, body = receive(sock)
@@ -227,7 +227,7 @@ class RecoveryTests(StoreFixture, unittest.TestCase):
         self.until(lambda: len(self.rows("A")) == 1)
         csv_line = (self.folder / "A/sales.csv").read_bytes().splitlines(keepends=True)[1]
         with socket.create_connection(("127.0.0.1", self.ports["A"]), timeout=3) as sock:
-            hello = f"X B 100000 127.0.0.1 {self.ports['B']} 1 10 0".encode()
+            hello = f"Cadena_1 B 100000 127.0.0.1 {self.ports['B']} 1 10 0".encode()
             inventory = b"1 1 0 0 A:1;B:1\n" + csv_line
             sock.sendall(wire(1, hello) + wire(13, inventory))
             sock.settimeout(.1)
@@ -248,7 +248,7 @@ class RecoveryTests(StoreFixture, unittest.TestCase):
         self.configure("A", delay=5000)
         self.start("A")
         with socket.create_connection(("127.0.0.1", self.ports["A"]), timeout=3) as sock:
-            hello = f"X B 100000 127.0.0.1 {self.ports['B']} 1 10 0".encode()
+            hello = f"Cadena_1 B 100000 127.0.0.1 {self.ports['B']} 1 10 0".encode()
             sock.sendall(wire(1, hello))
             self.until(lambda: b"Red: CONECTADA" in self.status("A"))
             self.current["A"].send("venta 10\n")
@@ -273,7 +273,7 @@ class RecoveryTests(StoreFixture, unittest.TestCase):
         prefix = f"R7|1|2|B,1,P;C,1,P|{csv}"
         proof = f"{prefix}|{zlib.crc32(prefix.encode()):08x}\n".encode()
         with socket.create_connection(("127.0.0.1", self.ports["C"]), timeout=3) as sock:
-            sock.sendall(wire(1, f"X B 100000 127.0.0.1 {self.ports['B']} 1 2 0".encode()) + wire(9, proof))
+            sock.sendall(wire(1, f"Cadena_1 B 100000 127.0.0.1 {self.ports['B']} 1 2 0".encode()) + wire(9, proof))
             while True:
                 kind, body = receive(sock)
                 if kind == 4: sock.sendall(wire(5))
@@ -288,7 +288,7 @@ class RecoveryTests(StoreFixture, unittest.TestCase):
     def test_previous_wire_version_is_rejected_without_affecting_sales(self):
         self.start("A")
         with socket.create_connection(("127.0.0.1", self.ports["A"]), timeout=3) as sock:
-            packet = bytearray(wire(1, b"X B 100000"))
+            packet = bytearray(wire(1, b"Cadena_1 B 100000"))
             packet[4] = 1
             sock.sendall(packet)
             self.until(lambda: b"Mensaje de red rechazado" in self.current["A"].errors)

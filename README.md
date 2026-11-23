@@ -21,7 +21,7 @@ make
 
 Ejecuta todos los comandos desde la raíz del repositorio, después de compilar. Abre una terminal diferente para cada tienda que quieras mantener activa. Después de actualizar el programa, termina las instancias anteriores y vuelve a iniciar todas las tiendas con el ejecutable nuevo.
 
-Las tiendas A, B y C pertenecen a la cadena X y comparten un límite de 300000 centavos:
+Las tiendas A, B y C pertenecen a la cadena Cadena_1 y comparten un límite de 300000 centavos:
 
 ```sh
 # Terminal 1: tienda A
@@ -45,7 +45,7 @@ La tienda D es independiente y tiene un límite de 100000 centavos:
 ./bin/blackout --config config/tienda-d.conf
 ```
 
-Las tiendas E y F pertenecen a la cadena Y y comparten un límite de 200000 centavos:
+Las tiendas E y F pertenecen a la cadena Cadena_2 y comparten un límite de 200000 centavos:
 
 ```sh
 # Terminal 5: tienda E
@@ -57,11 +57,11 @@ Las tiendas E y F pertenecen a la cadena Y y comparten un límite de 200000 cent
 ./bin/blackout --config config/tienda-f.conf
 ```
 
-Las configuraciones finales permiten ejecutar las seis tiendas en la misma computadora. Los puertos entre tiendas son 5101–5103 para X y 5105–5106 para Y; D no usa red de cadena. Cada tienda guarda su historial por separado en `data/A`, `data/B`, `data/C`, `data/D`, `data/E` o `data/F`. Los directorios y archivos necesarios se crean automáticamente al iniciar por primera vez. Para volver a abrir una tienda conservando su historial, ejecuta su mismo comando.
+Las configuraciones finales permiten ejecutar las seis tiendas en la misma computadora. Los puertos entre tiendas son 5101–5103 para Cadena_1 y 5105–5106 para Cadena_2; D no usa red de cadena. Cada tienda guarda su historial por separado en `data/A`, `data/B`, `data/C`, `data/D`, `data/E` o `data/F`. Los directorios y archivos necesarios se crean automáticamente al iniciar por primera vez. Para volver a abrir una tienda conservando su historial, ejecuta su mismo comando.
 
 Para borrar el historial de ventas y comenzar de cero, primero termina las tiendas con `salir` y elimina sus carpetas completas dentro de `data/` (por ejemplo, `data/D` para la tienda independiente). Al volver a iniciarlas, si sus carpetas no existen o están vacías, las tiendas crean automáticamente los directorios y archivos necesarios y comienzan con un historial vacío.
 
-Para reiniciar una cadena, detén todos sus integrantes y elimina las carpetas de todos ellos: `data/A`, `data/B` y `data/C` para X, o `data/E` y `data/F` para Y. Incluye las tiendas desconectadas; una que conserve su historial podría volver a compartir las ventas antiguas al reconectarse.
+Para reiniciar una cadena, detén todos sus integrantes y elimina las carpetas de todos ellos: `data/A`, `data/B` y `data/C` para Cadena_1, o `data/E` y `data/F` para Cadena_2. Incluye las tiendas desconectadas; una que conserve su historial podría volver a compartir las ventas antiguas al reconectarse.
 
 Las tiendas de la cadena pueden iniciar en cualquier orden. Usa `estado` para comprobar sus conexiones y el orden de incorporación conocido. Las ventas propias nuevas esperan cinco segundos antes de compartirse; durante esa espera puedes seguir usando la consola.
 

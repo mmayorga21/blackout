@@ -78,7 +78,7 @@ class HoldingPeer:
 
     def handle(self, sock):
         try:
-            sock.sendall(wire(1, f"X A 100000 127.0.0.1 {self.port} 1 1 0".encode()))
+            sock.sendall(wire(1, f"Cadena_1 A 100000 127.0.0.1 {self.port} 1 1 0".encode()))
             while not self.stopping.is_set():
                 kind, body = receive(sock)
                 if kind == 2:
@@ -134,7 +134,7 @@ class StoreFixture:
                          ("timeout_ms=2000", f"timeout_ms={timeout}"), ("sale_share_delay_ms=5000", f"sale_share_delay_ms={delay}"),
                          ("queue_capacity=256", "queue_capacity=4"), ("limit_cent=300000", f"limit_cent={limit}"),
                          ("data_dir=data/A", f"data_dir={self.folder}/{name}"),
-                         ("peers_file=config/cadena-x.peers", f"peers_file={catalog}")]:
+                         ("peers_file=config/cadena-1.peers", f"peers_file={catalog}")]:
             text = text.replace(old, new)
         path = self.folder / f"{name}.conf"
         path.write_text(text)
@@ -233,7 +233,7 @@ class MultipleStores(StoreFixture, unittest.TestCase):
 
         self.until(listening)
         with socket.create_connection(("127.0.0.1", self.ports["C"]), timeout=3) as sock:
-            sock.sendall(wire(1, f"X A 100000 127.0.0.1 {self.ports['A']} 1 1 0".encode()))
+            sock.sendall(wire(1, f"Cadena_1 A 100000 127.0.0.1 {self.ports['A']} 1 1 0".encode()))
 
             def reply():
                 while True:
@@ -305,7 +305,7 @@ class MultipleStores(StoreFixture, unittest.TestCase):
         self.settle()
         self.current["B"].stop(kill=True)
         self.until(lambda: all("Se perdió la conexión con la tienda B".encode() in self.current[name].errors for name in "AC"))
-        self.until(lambda: "Aviso de cadena X:".encode() in self.current["C"].errors)
+        self.until(lambda: "Aviso de cadena Cadena_1:".encode() in self.current["C"].errors)
         self.current["C"].send("venta 50\n")
         self.until(lambda: self.equal("AC", 1))
 
