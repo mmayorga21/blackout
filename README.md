@@ -59,6 +59,10 @@ Las tiendas E y F pertenecen a la cadena Y y comparten un límite de 200000 cent
 
 Las configuraciones finales permiten ejecutar las seis tiendas en la misma computadora. Los puertos entre tiendas son 5101–5103 para X y 5105–5106 para Y; D no usa red de cadena. Cada tienda guarda su historial por separado en `data/A`, `data/B`, `data/C`, `data/D`, `data/E` o `data/F`. Los directorios y archivos necesarios se crean automáticamente al iniciar por primera vez. Para volver a abrir una tienda conservando su historial, ejecuta su mismo comando.
 
+Para borrar el historial de ventas y comenzar de cero, primero termina las tiendas con `salir` y elimina sus carpetas completas dentro de `data/` (por ejemplo, `data/D` para la tienda independiente). Al volver a iniciarlas, si sus carpetas no existen o están vacías, las tiendas crean automáticamente los directorios y archivos necesarios y comienzan con un historial vacío.
+
+Para reiniciar una cadena, detén todos sus integrantes y elimina las carpetas de todos ellos: `data/A`, `data/B` y `data/C` para X, o `data/E` y `data/F` para Y. Incluye las tiendas desconectadas; una que conserve su historial podría volver a compartir las ventas antiguas al reconectarse.
+
 Las tiendas de la cadena pueden iniciar en cualquier orden. Usa `estado` para comprobar sus conexiones y el orden de incorporación conocido. Las ventas propias nuevas esperan cinco segundos antes de compartirse; durante esa espera puedes seguir usando la consola.
 
 ## Comandos de las tiendas
