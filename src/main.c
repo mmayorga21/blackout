@@ -4,6 +4,8 @@
 #include "government.h"
 #include "input.h"
 #include "peers.h"
+#include "generator.h"
+#include <errno.h>
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -15,8 +17,27 @@ int main(int argc, char **argv)
     if (setvbuf(stdout, NULL, _IOLBF, 0) != 0) return EXIT_FAILURE;
     /* La validación usa fgets; luego poll/read reciben comandos sin datos prefetched. */
     if (setvbuf(stdin, NULL, _IONBF, 0) != 0) return EXIT_FAILURE;
+    if (argc >= 2 && (!strcmp(argv[1], "--generador") || !strcmp(argv[1], "--generador-tienda"))) {
+        int internal = !strcmp(argv[1], "--generador-tienda");
+        pid_t parent = 0;
+        int offset = 2;
+        if (internal) {
+            if (argc < 3) return EXIT_FAILURE;
+            errno = 0; char *end;
+            long value = strtol(argv[2], &end, 10);
+            if (errno || *end || value < 1 || value > INT32_MAX) return EXIT_FAILURE;
+            parent = (pid_t)value;
+            offset = 3;
+        }
+        generator_options options;
+        if (generator_parse(argc - offset, argv + offset, &options) < 0) {
+            fputs("Uso: blackout --generador MIN MAX INTERVALO_MS CANTIDAD [SEMILLA].\n", stderr);
+            return EXIT_FAILURE;
+        }
+        return generator_run(&options, parent) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
     if (argc == 2 && strcmp(argv[1], "--help") == 0) {
-        puts("Uso: blackout --config RUTA [--historial]\n     blackout --gobierno RUTA\nTiendas independientes, cadenas y consultor del gobierno.");
+        puts("Uso: blackout --config RUTA [--historial]\n     blackout --gobierno RUTA\n     blackout --generador MIN MAX INTERVALO_MS CANTIDAD [SEMILLA]\nTiendas independientes, cadenas y consultor del gobierno.");
         return EXIT_SUCCESS;
     }
     if (argc == 3 && !strcmp(argv[1], "--gobierno")) return government_run(argv[2]);

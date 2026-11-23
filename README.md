@@ -1,6 +1,6 @@
 # Compilación
 
-Requisitos: Linux, GCC con soporte para C11 y Pthreads, y GNU Make.
+Requisitos: Linux con `/proc` y glibc 2.34 o posterior, GCC con soporte para C11 y Pthreads, y GNU Make.
 
 Desde la raíz del repositorio, ejecuta:
 
@@ -97,6 +97,8 @@ Escribe un comando y pulsa Enter en la terminal de la tienda correspondiente:
 | Comando | Uso |
 | --- | --- |
 | `venta CENTAVOS` | Registra una venta propia con un importe entero positivo en centavos. Por ejemplo, `venta 1250` registra 12,50 unidades monetarias. |
+| `generar MIN MAX INTERVALO_MS CANTIDAD [SEMILLA]` | Inicia un proceso que produce compras con importes aleatorios entre MIN y MAX centavos, ambos incluidos. Por ejemplo, `generar 100 200 1000 5 42`. |
+| `detener` | Detiene y recoge el generador de esa tienda. Las solicitudes que ya estaban en la cola siguen las reglas normales de aceptación. |
 | `estado` | Muestra el estado de la tienda, cantidad de ventas, ingresos propios y límite. En una cadena también muestra ingresos conocidos de cadena, límite compartido, conexiones, cierre y recuperación pendiente. |
 | `historial` | Muestra las ventas registradas con identificador, fecha y hora e importe. En una cadena incluye las ventas recibidas de otras tiendas. |
 | `ayuda` | Muestra los comandos disponibles. |
@@ -104,6 +106,26 @@ Escribe un comando y pulsa Enter en la terminal de la tienda correspondiente:
 | `conectar` | Reactiva la red de la cadena, asigna una nueva posición y recupera las ventas faltantes en ambos sentidos, sin duplicarlas. |
 | `cerrar` | Solicita detener ventas de la cadena antes de alcanzar el límite y sincronizar el grupo conectado. Mantiene las consolas disponibles. |
 | `salir` | Termina el proceso y conserva el historial. Intenta confirmar sus ventas con las tiendas conectadas durante un plazo limitado; informa de los pendientes que quedan para el próximo inicio. |
+
+Para simular compradores desde la consola de una tienda abierta:
+
+```text
+generar 100 200 1000 5 42
+```
+
+Solicita cinco compras de 100 a 200 centavos, separadas por 1000 ms. La primera se emite inmediatamente. `MIN` y `MAX` son enteros positivos de hasta 64 bits; el intervalo admite de 1 a 3600000 ms y la cantidad es un entero positivo de hasta 64 bits sin signo. La semilla opcional admite de 0 a 18446744073709551615. Si se omite, se obtiene una semilla de `/dev/urandom`; si se repite, reproduce los mismos importes. Cada ejecución registra compras nuevas con sus propios identificadores y fechas.
+
+Puedes seguir escribiendo `estado`, `historial`, `venta`, `desconectar`, `conectar` y los demás comandos durante la generación. Solo se permite un generador activo por tienda. `detener` permite finalizarlo antes de agotar la cantidad y luego iniciar otro. Si se llena la cola, el productor espera espacio mediante la tubería; el intervalo no garantiza un ritmo exacto de aceptación bajo carga.
+
+Cada tienda controla su proceso generador. El aislamiento de red permite continuar las compras locales mientras la tienda admita ventas. Al conocer el cierre o alcanzar el límite, la tienda detiene su generador y mantiene la consola en solo consulta. `salir` también termina y recoge al hijo. Si el generador falla, se informa y la tienda conserva su consola. La cantidad indicada es de solicitudes: la aceptación se confirma en el bloque de cada venta. Una solicitud sin confirmación no debe reingresarse a ciegas.
+
+También puedes ejecutar el generador de forma independiente para ver las solicitudes, sin abrir tiendas ni escribir historiales:
+
+```sh
+./bin/blackout --generador 100 200 1000 5 42
+```
+
+Imprime únicamente líneas `venta CENTAVOS`. No genera `salir` ni otros comandos. Si conectas su salida directamente a la entrada de una tienda, el fin de esa entrada provoca la salida normal de la tienda; usa el comando integrado `generar` para conservar el control interactivo.
 
 La tienda independiente tiene su propio límite. Las tiendas de una cadena comparten un único límite sobre la suma de ventas de toda la cadena; todas deben configurar el mismo `limit_cent`.
 

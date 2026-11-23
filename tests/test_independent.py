@@ -3,6 +3,8 @@ import os
 import csv
 from datetime import datetime
 import io
+import time
+import re
 from pathlib import Path
 import selectors
 import subprocess
@@ -337,6 +339,117 @@ class IndependentStore(unittest.TestCase):
         self.assert_ok(result)
         self.assertIn("Estado: ABIERTA", result.stdout)
         self.assertIn("Ventas: 1\nIngresos: 25", result.stdout)
+
+    def generator_store(self):
+        from test_network import RunningStore
+        store = RunningStore(self.config)
+        self.addCleanup(store.stop)
+        return store
+
+    def generator_until(self, store, predicate, timeout=10):
+        deadline = time.monotonic() + timeout
+        while not predicate():
+            self.assertLess(time.monotonic(), deadline, store.output + store.errors)
+            self.assertIsNone(store.process.poll(), store.output + store.errors)
+            store.pump(.01)
+
+    def generator_rows(self):
+        if not self.journal.exists(): return []
+        with self.journal.open() as file:
+            return list(csv.DictReader(file))
+
+    def test_generator_seed_range_and_invalid_options(self):
+        def run(*args):
+            return subprocess.run([str(BINARY), "--generador", *map(str, args)], capture_output=True, timeout=5)
+        first = run(100, 200, 1, 20, 42)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(first.stdout, run(100, 200, 1, 20, 42).stdout)
+        self.assertNotEqual(first.stdout, run(100, 200, 1, 20, 43).stdout)
+        values = [int(line.split()[1]) for line in first.stdout.splitlines()]
+        self.assertEqual(len(values), 20)
+        self.assertTrue(all(100 <= amount <= 200 for amount in values))
+        self.assertEqual(run(9223372036854775807, 9223372036854775807, 1, 1, 0).stdout,
+                         b"venta 9223372036854775807\n")
+        self.assertEqual(run(1, 1, 1, 2).stdout, b"venta 1\nventa 1\n")
+        for args in ((0, 1, 1, 1), (2, 1, 1, 1), (1, 2, 0, 1), (1, 2, 3600001, 1),
+                     (1, 2, 1, 0), (1, 2, 1, 1, -1), (1, 2, 1), (1, 2, 1, 1, 2, 3),
+                     (1, 9223372036854775808, 1, 1), (1, 2, 1, 18446744073709551616)):
+            with self.subTest(args=args):
+                result = run(*args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, b"")
+
+    def test_generator_console_and_manual_sales_remain_available(self):
+        store = self.generator_store()
+        store.send("generar 100 200 10 10 42\nventa 3\nestado\nhistorial\n")
+        self.generator_until(store, lambda: b"GENERADOR: finalizado" in store.output and len(self.generator_rows()) == 11)
+        self.assertEqual(sum(row["valor_venta"] == "0.03" for row in self.generator_rows()), 1)
+        store.send("venta 7\nestado\n")
+        self.generator_until(store, lambda: len(self.generator_rows()) == 12)
+        self.assertEqual(store.stop(), 0)
+
+    def test_generator_stop_reaps_child_and_can_restart(self):
+        store = self.generator_store()
+        store.send("generar 2 2 60000 100 42\n")
+        self.generator_until(store, lambda: b"Generador iniciado:" in store.output and len(self.generator_rows()) == 1)
+        pid = int(re.search(rb"Generador iniciado: PID (\d+)", store.output)[1])
+        # El hijo solo debe poseer stdin/stdout/stderr, no archivos de la tienda.
+        self.assertTrue(set(os.listdir(f"/proc/{pid}/fd")) <= {"0", "1", "2"})
+        store.send("generar 1 1 1 1\ngenerar 0 1 1 1\ndetener\n")
+        self.generator_until(store, lambda: "Detención manual.".encode() in store.output)
+        self.assertFalse(Path(f"/proc/{pid}").exists())
+        self.assertIn(b"Ya hay un generador activo", store.errors)
+        self.assertIn(b"Uso: generar", store.errors)
+        store.send("generar 3 3 1 1 42\n")
+        self.generator_until(store, lambda: b"GENERADOR: finalizado" in store.output and len(self.generator_rows()) == 2)
+        store.send("detener\nventa 4\n")
+        self.generator_until(store, lambda: len(self.generator_rows()) == 3)
+        self.assertEqual(store.stop(), 0)
+
+    def test_generator_limit_stops_child_without_closing_console(self):
+        self.configure(limit=3)
+        store = self.generator_store()
+        store.send("generar 1 1 1 10000 42\n")
+        self.generator_until(store, lambda: b"Ventas deshabilitadas." in store.output)
+        self.assertEqual(len(self.generator_rows()), 3)
+        store.send("generar 1 1 1 5\nhistorial\nestado\n")
+        self.generator_until(store, lambda: b"Generador rechazado" in store.errors and b"D:3 |" in store.output)
+        self.assertIn(b"SOLO_CONSULTA", store.output)
+        self.assertEqual(store.stop(), 0)
+
+    def test_generator_queue_backpressure_loses_no_purchases(self):
+        self.config.write_text(self.config.read_text().replace("queue_capacity=256", "queue_capacity=1"))
+        store = self.generator_store()
+        store.send("generar 1 1 1 100 42\nestado\n")
+        self.generator_until(store, lambda: b"GENERADOR: finalizado" in store.output and len(self.generator_rows()) == 100, timeout=20)
+        self.assertEqual(len({row["identificador"] for row in self.generator_rows()}), 100)
+        self.assertEqual(store.stop(), 0)
+
+    def test_generator_child_failure_does_not_stop_store(self):
+        store = self.generator_store()
+        store.send("generar 2 2 60000 100 42\n")
+        self.generator_until(store, lambda: b"Generador iniciado:" in store.output and len(self.generator_rows()) == 1)
+        pid = int(re.search(rb"Generador iniciado: PID (\d+)", store.output)[1])
+        os.kill(pid, 9)
+        self.generator_until(store, lambda: "El generador terminó con error".encode() in store.errors)
+        self.assertFalse(Path(f"/proc/{pid}").exists())
+        store.send("venta 3\n")
+        self.generator_until(store, lambda: len(self.generator_rows()) == 2)
+        self.assertEqual(store.stop(), 0)
+
+    def test_generator_parent_death_terminates_sleeping_child(self):
+        store = self.generator_store()
+        store.send("generar 2 2 60000 100 42\n")
+        self.generator_until(store, lambda: b"Generador iniciado:" in store.output and len(self.generator_rows()) == 1)
+        pid = int(re.search(rb"Generador iniciado: PID (\d+)", store.output)[1])
+        store.stop(kill=True)
+        deadline = time.monotonic() + 5
+        def running():
+            try: return Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1][0] != "Z"
+            except (FileNotFoundError, ProcessLookupError): return False
+        while running():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
 
 
 if __name__ == "__main__":

@@ -297,5 +297,37 @@ class RecoveryTests(StoreFixture, unittest.TestCase):
         self.until(lambda: len(self.rows("A")) == 1)
         self.assertIsNone(self.current["A"].process.poll())
 
+    def test_generator_isolated_store_keeps_selling_and_recovers(self):
+        for name in "ABC":
+            self.configure(name, delay=0)
+            self.start(name)
+        self.settle("ABC")
+        self.command("C", "desconectar", "Red desactivada")
+        self.current["C"].send("generar 5 5 5 3 42\n")
+        for name in "AB": self.current[name].send("generar 10 10 5 2 42\n")
+        self.until(lambda: len(self.rows("C")) == 3 and self.equal("AB", 4))
+        self.command("C", "conectar", "Red activada")
+        self.settle("ABC")
+        self.until(lambda: self.equal("ABC", 7))
+        self.assertEqual(sum(float(row["valor_venta"]) for row in self.rows("A")), .55)
+
+    def test_generator_shared_limit_stops_all_connected_producers(self):
+        for name in "AB":
+            self.configure(name, limit=6, delay=0)
+            self.start(name)
+        self.settle("AB")
+        for name in "AB": self.current[name].send("generar 1 1 10 1000 42\n")
+        self.until(lambda: all(b"Ventas deshabilitadas." in self.current[name].output for name in "AB"))
+        self.settle("AB")
+        self.until(lambda: self.equal("AB", len(self.rows("A"))))
+        self.until(lambda: self.closed("AB"))
+        count = len(self.rows("A"))
+        self.assertGreaterEqual(count, 6)
+        self.assertLess(count, 20)
+        self.assertTrue(self.equal("AB", count))
+        for name in "AB":
+            self.current[name].send("generar 1 1 1 5\nestado\n")
+        self.until(lambda: all(b"Generador rechazado" in self.current[name].errors for name in "AB"))
+
 
 if __name__ == "__main__": unittest.main()

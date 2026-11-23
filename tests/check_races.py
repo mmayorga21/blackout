@@ -106,3 +106,16 @@ for pattern in ("independent_live", "chain_queries", "isolated_chain", "queries_
                             capture_output=True, text=True, timeout=60)
     check(result)
 print("ThreadSanitizer: consultas de gobierno, aislamiento, caché y snapshots contables sin diagnósticos de carreras.")
+
+
+for suite, pattern in (("test_independent.py", "generator_console"),
+                       ("test_independent.py", "generator_limit"),
+                       ("test_independent.py", "generator_queue"),
+                       ("test_recovery.py", "generator")):
+    result = subprocess.run(["python3", "-m", "unittest", "discover", "-s", str(ROOT / "tests"),
+                             "-p", suite, "-k", pattern, "-v"],
+                            env={**ENV, "BLACKOUT_NETWORK_TEST_BINARY": str(ROOT / "build/tsan/blackout"),
+                                 "BLACKOUT_NETWORK_TEST_TSAN": "1"},
+                            capture_output=True, text=True, timeout=60)
+    check(result)
+print("ThreadSanitizer: generador, consola concurrente, contrapresión, límite compartido y aislamiento sin diagnósticos de carreras.")
