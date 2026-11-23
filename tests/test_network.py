@@ -105,16 +105,16 @@ class TwoStores(unittest.TestCase):
             self.configure(name)
 
     def configure(self, name, chain="X", limit=100000, capacity=1, delay=0, timeout=500):
-        text = (ROOT / "config/demo-dos/tienda-a.conf").read_text().replace("query_port=6201\n", "")
+        text = (ROOT / "config/tienda-a.conf").read_text().replace("query_port=6101\n", "")
         text = text.replace("store_id=A", f"store_id={name}")
         text = text.replace("chain_id=X", f"chain_id={chain}")
         text = text.replace("port=5101", f"port={self.ports[name]}")
-        text = text.replace("limit_cent=100000", f"limit_cent={limit}")
+        text = text.replace("limit_cent=300000", f"limit_cent={limit}")
         text = text.replace("timeout_ms=2000", f"timeout_ms={timeout}")
         text = text.replace("sale_share_delay_ms=5000", f"sale_share_delay_ms={delay}")
         text = text.replace("queue_capacity=256", f"queue_capacity={capacity}")
-        text = text.replace("data_dir=data/demo-dos/A", f"data_dir={self.folder}/{name}")
-        text = text.replace("peers_file=config/demo-dos/cadena-x.peers", f"peers_file={self.peers}")
+        text = text.replace("data_dir=data/A", f"data_dir={self.folder}/{name}")
+        text = text.replace("peers_file=config/cadena-x.peers", f"peers_file={self.peers}")
         path = self.folder / f"{name}.conf"
         path.write_text(text)
         return path

@@ -21,7 +21,7 @@ make
 
 Ejecuta todos los comandos desde la raíz del repositorio, después de compilar. Abre una terminal diferente para cada tienda que quieras mantener activa. Después de actualizar el programa, termina las instancias anteriores y vuelve a iniciar todas las tiendas con el ejecutable nuevo.
 
-Las tiendas A, B y C pertenecen a la cadena X:
+Las tiendas A, B y C pertenecen a la cadena X y comparten un límite de 300000 centavos:
 
 ```sh
 # Terminal 1: tienda A
@@ -38,57 +38,28 @@ Las tiendas A, B y C pertenecen a la cadena X:
 ./bin/blackout --config config/tienda-c.conf
 ```
 
-La tienda D es independiente:
+La tienda D es independiente y tiene un límite de 100000 centavos:
 
 ```sh
 # Terminal 4: tienda D
 ./bin/blackout --config config/tienda-d.conf
 ```
 
-Las configuraciones incluidas permiten ejecutar todas las tiendas en la misma computadora: A, B y C usan los puertos 5101, 5102 y 5103. Cada tienda guarda sus datos por separado en `data/A`, `data/B`, `data/C` o `data/D`; los directorios se crean al iniciar por primera vez. Para volver a abrir una tienda conservando su historial, ejecuta su mismo comando.
+Las tiendas E y F pertenecen a la cadena Y y comparten un límite de 200000 centavos:
+
+```sh
+# Terminal 5: tienda E
+./bin/blackout --config config/tienda-e.conf
+```
+
+```sh
+# Terminal 6: tienda F
+./bin/blackout --config config/tienda-f.conf
+```
+
+Las configuraciones finales permiten ejecutar las seis tiendas en la misma computadora. Los puertos entre tiendas son 5101–5103 para X y 5105–5106 para Y; D no usa red de cadena. Cada tienda guarda su historial por separado en `data/A`, `data/B`, `data/C`, `data/D`, `data/E` o `data/F`. Los directorios y archivos necesarios se crean automáticamente al iniciar por primera vez. Para volver a abrir una tienda conservando su historial, ejecuta su mismo comando.
 
 Las tiendas de la cadena pueden iniciar en cualquier orden. Usa `estado` para comprobar sus conexiones y el orden de incorporación conocido. Las ventas propias nuevas esperan cinco segundos antes de compartirse; durante esa espera puedes seguir usando la consola.
-
-Para probar una cadena con límite compartido de 300000 centavos, mayor que los 100000 de D, puedes usar estos ejemplos en tres terminales diferentes:
-
-```sh
-./bin/blackout --config config/demo-ocho/tienda-a.conf
-./bin/blackout --config config/demo-ocho/tienda-b.conf
-./bin/blackout --config config/demo-ocho/tienda-c.conf
-```
-
-Usan los puertos 5301–5303 y guardan historiales separados en `data/demo-ocho/A`, B y C. Elige un conjunto de configuraciones para cada prueba.
-
-## Iniciar los perfiles para pruebas manuales
-
-Estos perfiles usan historiales separados en `data/manual/`. Abre una terminal por proceso y ejecuta los que necesites:
-
-```sh
-./bin/blackout --config config/manual/tienda-a.conf
-./bin/blackout --config config/manual/tienda-b.conf
-./bin/blackout --config config/manual/tienda-c.conf
-./bin/blackout --config config/manual/tienda-d.conf
-./bin/blackout --config config/manual/tienda-e.conf
-./bin/blackout --config config/manual/tienda-f.conf
-./bin/blackout --gobierno config/manual/gobierno.conf
-```
-
-A/B/C comparten el límite de X de 30000 centavos; E/F comparten el de Y de 20000; D tiene su límite independiente de 10000. Los puertos entre tiendas son 5501–5503 y 5505–5506; las consultas usan 6501–6506. Las rutas de datos se crean al iniciar y se conservan entre ejecuciones.
-
-## Corregir la configuración al iniciar
-
-Si un archivo de configuración o catálogo tiene un error, el programa permite corregir el mismo archivo y pulsar Enter para reintentar sin reiniciar el proceso. Escribe `q` para cancelar. Esto funciona tanto para tiendas como para el consultor. Una invocación incorrecta muestra el uso y termina; un error grave de almacenamiento o corrupción detiene el proceso para conservar los datos y permitir su revisión.
-
-En la configuración de tienda puedes ajustar estos plazos, en milisegundos:
-
-| Clave | Uso y valor si se omite |
-| --- | --- |
-| `timeout_ms` | Plazo de red requerido. |
-| `sale_share_delay_ms` | Espera antes de compartir ventas propias nuevas; 5000 si se omite. No retrasa artificialmente comandos ni confirmaciones. |
-| `control_timeout_ms` | Espera máxima local para aplicar `conectar` o `desconectar`; el doble de `timeout_ms`, limitado a 60000, si se omite. No garantiza que otros procesos ya hayan detectado la conexión. |
-| `close_timeout_ms` | Espera máxima al salir para intentar compartir pendientes; el doble de `timeout_ms` más `sale_share_delay_ms`, limitado a 60000, si se omite. |
-
-Los dos últimos admiten de 1 a 60000. Un plazo de salida vencido conserva los pendientes para el próximo inicio; no certifica una sincronización que no se haya completado.
 
 ## Comandos de las tiendas
 
@@ -146,19 +117,13 @@ Sustituye el archivo de configuración para consultar otra tienda. La tienda deb
 
 ## Iniciar y usar el consultor del gobierno
 
-Con las tiendas originales iniciadas, abre otra terminal desde la raíz del repositorio:
+Abre otra terminal desde la raíz del repositorio para consultar las seis tiendas:
 
 ```sh
 ./bin/blackout --gobierno config/gobierno.conf
 ```
 
-Si estás usando las tiendas de `config/demo-ocho/`, inicia el consultor con su configuración correspondiente:
-
-```sh
-./bin/blackout --gobierno config/demo-ocho/gobierno.conf
-```
-
-Ambos ejemplos incluyen D, que se inicia con `config/tienda-d.conf`. El gobierno puede iniciarse antes o después de las tiendas; ellas pueden seguir vendiendo si el consultor está apagado.
+El gobierno puede iniciarse antes o después de las tiendas; ellas pueden seguir vendiendo si el consultor está apagado.
 
 | Comando del gobierno | Uso |
 | --- | --- |
@@ -171,11 +136,11 @@ Una `RESPUESTA ACTUAL` fue recibida en esa consulta. Si una tienda no responde o
 
 `desconectar` aísla únicamente la comunicación entre tiendas: mientras el proceso siga activo, el gobierno puede consultarlo y verá `Red de cadena: AISLADA`. Después de `salir` o de apagar su computadora, solo estará disponible la información que el consultor haya conservado.
 
-Las respuestas se guardan en `data/gobierno/consultas.log`, o en `data/demo-ocho/gobierno/consultas.log` para ese ejemplo. Se recuperan al volver a iniciar el consultor. Ejecuta un solo consultor por directorio de historial.
+Las respuestas se guardan en `data/gobierno/consultas.log`. Se recuperan al volver a iniciar el consultor. Ejecuta un solo consultor por directorio de historial.
 
 Para configurar otros destinos:
 
 - En cada archivo de tienda, `query_port` indica su puerto de consulta, distinto de `port`. Omitirlo o usar `query_port=0` desactiva las consultas remotas.
-- Los ejemplos originales usan los puertos de consulta 6101–6104 para A–D. La demostración de etapa 8 usa 6401–6403 para A–C y 6104 para D.
+- Las configuraciones finales usan los puertos de consulta 6101–6106 para A–F.
 - En `gobierno.conf`, `stores_file` apunta al catálogo, `data_dir` selecciona el historial del consultor y `timeout_ms` fija el plazo de consulta.
 - Cada línea del catálogo tiene formato `ID CADENA IPv4 PUERTO_DE_CONSULTA`; D utiliza `none` como cadena. Las identidades y direcciones deben ser únicas. Las rutas se interpretan respecto al directorio de ejecución.

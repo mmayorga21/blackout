@@ -1,5 +1,3 @@
-# Formato previsto: store_id IPv4 puerto. Incluye el catálogo completo.
-# La lectura de pares y la comunicación se implementarán en la etapa de red.
 A 127.0.0.1 5101
 B 127.0.0.1 5102
 C 127.0.0.1 5103
